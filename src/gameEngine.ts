@@ -147,6 +147,77 @@ export const CARD_BY_ID: Record<string, CardDefinition> = Object.fromEntries(
   CARD_DEFINITIONS.map((c) => [c.id, c]),
 );
 
+/** Short risk lines for the Risks column (max seven words each). */
+const CARD_RISK_LINES: Record<string, readonly string[]> = {
+  historical_data: [
+    "Past customer language may encode demographic bias.",
+  ],
+  synthetic_data: ["Synthetic labels may drift from production traffic."],
+  pii_data: ["Redaction may limit rare-case detection quality."],
+  llm_classifier: [
+    "LLM routing automates decisions with thin grounding.",
+    "Model may mislabel plausible-sounding nonsense emails.",
+  ],
+  entity_recognition: [
+    "NER on people-related text raises re-identification risk.",
+  ],
+  human_review: ["Human queues add latency and staffing cost."],
+  bias_testing: ["Low-confidence routing inflates manual review volume."],
+  anonymisation: ["Strong logs and redaction trim usable signal."],
+};
+
+const RULE_RISK_LINES: Record<string, readonly string[]> = {
+  historical_plus_llm: ["Legacy inbox plus LLM amplifies encoded bias."],
+  pii_plus_ner: ["Entity extraction plus PII heightens exposure risk."],
+  llm_without_human: ["Automated LLM lacks mandatory human oversight."],
+  synthetic_with_any_model: ["Synthetic training may miss real inbox nuance."],
+};
+
+/**
+ * Ordered bullet lines describing risks and tradeoffs from the current build.
+ */
+export function getLiveRiskBulletStatements(
+  selection: GameSelection,
+): string[] {
+  const { selected_data, selected_models, selected_controls } = selection;
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  function pushUnique(lines: readonly string[]) {
+    for (const line of lines) {
+      if (seen.has(line)) continue;
+      seen.add(line);
+      out.push(line);
+    }
+  }
+
+  for (const id of selected_data) {
+    const lines = CARD_RISK_LINES[id];
+    if (lines) pushUnique(lines);
+  }
+  for (const id of selected_models) {
+    const lines = CARD_RISK_LINES[id];
+    if (lines) pushUnique(lines);
+  }
+
+  for (const rule of COMBINATION_RULES) {
+    if (
+      !ruleApplies(rule, selected_data, selected_models, selected_controls)
+    ) {
+      continue;
+    }
+    const lines = RULE_RISK_LINES[rule.id];
+    if (lines) pushUnique(lines);
+  }
+
+  for (const id of selected_controls) {
+    const lines = CARD_RISK_LINES[id];
+    if (lines) pushUnique(lines);
+  }
+
+  return out;
+}
+
 export const COMBINATION_RULES: CombinationRule[] = [
   {
     id: "historical_plus_llm",
@@ -284,6 +355,18 @@ export const STAT_LABELS: Record<RiskKey, string> = {
   automation: "AUTOMATION",
   hallucination: "HALLUCINATION",
 };
+
+/** Non-zero effects on each risk, in display order (for card preview UI). */
+export function getCardEffectRows(
+  effects: Partial<Record<RiskKey, number>>,
+): { key: RiskKey; delta: number }[] {
+  const rows: { key: RiskKey; delta: number }[] = [];
+  for (const k of RISK_KEYS) {
+    const v = effects[k];
+    if (v != null && v !== 0) rows.push({ key: k, delta: v });
+  }
+  return rows;
+}
 
 /** Win/lose checks vs stat row (Req = minimum, Max = ceiling). */
 export function getGameOverReasons(

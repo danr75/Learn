@@ -398,18 +398,6 @@
     background var(--transition);
 }
 
-.system-zone__drag-hit {
-  position: absolute;
-  inset: 0;
-  z-index: 4;
-  border-radius: inherit;
-  pointer-events: none;
-}
-
-.system-zone__drag-hit--active {
-  pointer-events: auto;
-}
-
 .system-zone__content {
   position: relative;
   z-index: 1;
@@ -660,6 +648,7 @@
 .game-card--lane-locked {
   opacity: 0.52;
   cursor: default;
+  -webkit-user-drag: none;
 }
 
 /* —— Board —— */
@@ -727,12 +716,17 @@
 /* —— Game cards —— */
 .game-card {
   width: 100%;
+  margin: 0;
   padding: var(--space-3) var(--space-3) var(--space-2);
+  font: inherit;
+  color: inherit;
   text-align: left;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
   box-shadow: var(--shadow-card);
   cursor: pointer;
+  user-select: none;
+  -webkit-user-drag: element;
   transition:
     transform var(--transition),
     box-shadow var(--transition),
@@ -881,6 +875,161 @@
 
 .slot--risk .slot-icon {
   color: rgba(248, 113, 113, 0.28);
+}
+
+/* —— Risks column: live build totals —— */
+.risks-panel {
+  flex: 1;
+  width: 100%;
+  min-height: 10rem;
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: var(--space-3);
+  text-align: left;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--risk-slot-border);
+  background: var(--risk-slot-bg);
+  scrollbar-gutter: stable;
+}
+
+.risks-panel--empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  text-align: center;
+}
+
+.risks-panel__icon {
+  width: 1.75rem;
+  height: 1.75rem;
+  color: rgba(248, 113, 113, 0.35);
+  flex-shrink: 0;
+  margin-top: var(--space-1);
+}
+
+.risks-panel__placeholder {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.risks-panel__placeholder strong {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.risks-panel__eyebrow {
+  margin: 0 0 var(--space-1);
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: var(--tracking-wider);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+}
+
+.risks-panel__title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-base);
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.risks-panel__hint {
+  margin: 0 0 var(--space-2);
+  font-size: 0.5625rem;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.risks-panel__none {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.risks-panel__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.risks-panel__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.risks-panel__row--raise {
+  border-color: rgba(248, 113, 113, 0.22);
+}
+
+.risks-panel__row--lower {
+  border-color: rgba(94, 234, 212, 0.2);
+}
+
+.risks-panel__metric {
+  font-size: 0.5625rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+}
+
+.risks-panel__delta {
+  font-size: var(--text-md);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.risks-panel__row--raise .risks-panel__delta {
+  color: #fecaca;
+}
+
+.risks-panel__row--lower .risks-panel__delta {
+  color: var(--accent-mint);
+}
+
+.risks-panel__note {
+  margin: var(--space-3) 0 0;
+  font-size: 0.5625rem;
+  line-height: 1.35;
+  color: var(--text-tertiary);
+}
+
+.risks-panel__bullets {
+  margin: 0;
+  padding: 0 0 0 1.1rem;
+  list-style: disc;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.risks-panel__bullet {
+  margin: 0;
+  padding: 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.risks-panel__bullet::marker {
+  color: rgba(248, 113, 113, 0.55);
 }
 
 /* —— Footer —— */

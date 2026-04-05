@@ -21,6 +21,7 @@ import {
   type CardType,
   computeGameState,
   getGameOverReasons,
+  getLiveRiskBulletStatements,
   STAT_FOOTERS,
   STAT_LABELS,
   type RiskKey,
@@ -122,8 +123,8 @@ function GameCard({
   selected: boolean;
   onSelect: () => void;
   draggable?: boolean;
-  onDragStart?: (e: React.DragEvent<HTMLButtonElement>) => void;
-  onDragEnd?: (e: React.DragEvent<HTMLButtonElement>) => void;
+  onDragStart?: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: (e: React.DragEvent<HTMLDivElement>) => void;
 }) {
   const mod =
     card.pillar === "DATA"
@@ -133,14 +134,23 @@ function GameCard({
         : "game-card--control";
   const label = `${card.title}. ${card.description}`;
 
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onSelect();
+    }
+  }
+
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       className={`game-card ${mod}${selected ? " game-card--selected" : ""}${draggable ? " game-card--draggable" : " game-card--lane-locked"}`}
       onClick={onSelect}
+      onKeyDown={handleKeyDown}
       aria-pressed={selected}
       aria-label={label}
     >
@@ -159,7 +169,70 @@ function GameCard({
           ))}
         </div>
       )}
-    </button>
+    </div>
+  );
+}
+
+function LiveRisksPanel({
+  statements,
+  hasBuild,
+}: {
+  statements: string[];
+  hasBuild: boolean;
+}) {
+  if (!hasBuild) {
+    return (
+      <div
+        className="risks-panel risks-panel--empty"
+        role="region"
+        aria-label="Live risks from system build"
+      >
+        <AlertCircle className="risks-panel__icon" strokeWidth={1} aria-hidden />
+        <p className="risks-panel__placeholder">
+          Concrete risk notes appear here as you drop cards into{" "}
+          <strong>System</strong>—Data, then Model, then Controls—including
+          combination effects.
+        </p>
+      </div>
+    );
+  }
+
+  if (statements.length === 0) {
+    return (
+      <div
+        className="risks-panel risks-panel--live"
+        role="region"
+        aria-label="Live risks from current system build"
+      >
+        <p className="risks-panel__eyebrow">Live</p>
+        <p className="risks-panel__title">Your system build</p>
+        <p className="risks-panel__hint">No scripted risk lines for this mix.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="risks-panel risks-panel--live"
+      role="region"
+      aria-label="Live risks from current system build"
+    >
+      <p className="risks-panel__eyebrow">Live</p>
+      <p className="risks-panel__title">Your system build</p>
+      <p className="risks-panel__hint">
+        Specific risks and tradeoffs from your current stack
+      </p>
+      <ul className="risks-panel__bullets">
+        {statements.map((line) => (
+          <li key={line} className="risks-panel__bullet">
+            {line}
+          </li>
+        ))}
+      </ul>
+      <p className="risks-panel__note">
+        Stat row above still shows numeric thresholds for deploy.
+      </p>
+    </div>
   );
 }
 
@@ -212,6 +285,11 @@ export default function App() {
 
   const { risks, unsafeNoHumanOversight } = useMemo(
     () => computeGameState(selection),
+    [selection],
+  );
+
+  const liveRiskStatements = useMemo(
+    () => getLiveRiskBulletStatements(selection),
     [selection],
   );
 
@@ -372,7 +450,7 @@ export default function App() {
   }
 
   function handleLaneDragStart(card: GameCardDef) {
-    return (e: React.DragEvent<HTMLButtonElement>) => {
+    return (e: React.DragEvent<HTMLDivElement>) => {
       if (gameOver || deploySuccess || !canDragCardToSystem(card)) {
         e.preventDefault();
         return;
@@ -548,15 +626,9 @@ export default function App() {
             className={systemZoneClass}
             data-drop-target="system"
             aria-label={systemZoneAria}
+            onDragOver={handleSystemZoneDragOver}
+            onDrop={handleSystemZoneDrop}
           >
-            <div
-              className={
-                "system-zone__drag-hit" +
-                (dragging ? " system-zone__drag-hit--active" : "")
-              }
-              onDragOver={handleSystemZoneDragOver}
-              onDrop={handleSystemZoneDrop}
-            />
             <div className="system-zone__content">
               {!hasSystemContent && (
                 <Rocket
@@ -704,12 +776,10 @@ export default function App() {
             </div>
             <div className="column">
               <h2 className="column-title">Risks</h2>
-              <div
-                className="slot slot--risk"
-                aria-label="Empty risks slot"
-              >
-                <AlertCircle className="slot-icon" strokeWidth={1} />
-              </div>
+              <LiveRisksPanel
+                statements={liveRiskStatements}
+                hasBuild={hasSystemContent}
+              />
             </div>
           </div>
         </div>
