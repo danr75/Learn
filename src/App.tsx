@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertCircle,
   Calendar,
   ChevronLeft,
   ChevronRight,
@@ -19,16 +18,25 @@ import {
   CARD_DEFINITIONS,
   type CardDefinition,
   type CardType,
+  type GameSelection,
+  buildEndgameSummary,
   computeGameState,
+  getComponentProConMessage,
   getGameOverReasons,
-  getLiveRiskBulletStatements,
-  STAT_FOOTERS,
+  getMetricPresentation,
+  getSystemStateTier,
+  hasDeployViolations,
+  riskDelta,
   STAT_LABELS,
   type RiskKey,
 } from "./gameEngine";
 import "./App.css";
 
 const CARD_DRAG_MIME = "application/x-legolearn-card";
+
+/** Single line shown in the blue band before the first drop. */
+const SCENARIO_ONLY =
+  "Build a system to classify customer emails using internal data — drag Data into System first, then a model, then controls.";
 
 type Pillar = "DATA" | "MODEL" | "CONTROL";
 
@@ -173,69 +181,6 @@ function GameCard({
   );
 }
 
-function LiveRisksPanel({
-  statements,
-  hasBuild,
-}: {
-  statements: string[];
-  hasBuild: boolean;
-}) {
-  if (!hasBuild) {
-    return (
-      <div
-        className="risks-panel risks-panel--empty"
-        role="region"
-        aria-label="Live risks from system build"
-      >
-        <AlertCircle className="risks-panel__icon" strokeWidth={1} aria-hidden />
-        <p className="risks-panel__placeholder">
-          Concrete risk notes appear here as you drop cards into{" "}
-          <strong>System</strong>—Data, then Model, then Controls—including
-          combination effects.
-        </p>
-      </div>
-    );
-  }
-
-  if (statements.length === 0) {
-    return (
-      <div
-        className="risks-panel risks-panel--live"
-        role="region"
-        aria-label="Live risks from current system build"
-      >
-        <p className="risks-panel__eyebrow">Live</p>
-        <p className="risks-panel__title">Your system build</p>
-        <p className="risks-panel__hint">No scripted risk lines for this mix.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className="risks-panel risks-panel--live"
-      role="region"
-      aria-label="Live risks from current system build"
-    >
-      <p className="risks-panel__eyebrow">Live</p>
-      <p className="risks-panel__title">Your system build</p>
-      <p className="risks-panel__hint">
-        Specific risks and tradeoffs from your current stack
-      </p>
-      <ul className="risks-panel__bullets">
-        {statements.map((line) => (
-          <li key={line} className="risks-panel__bullet">
-            {line}
-          </li>
-        ))}
-      </ul>
-      <p className="risks-panel__note">
-        Stat row above still shows numeric thresholds for deploy.
-      </p>
-    </div>
-  );
-}
-
 function SystemMiniCard({ card }: { card: GameCardDef }) {
   return (
     <div className="system-mini-card">
@@ -248,10 +193,69 @@ function SystemMiniCard({ card }: { card: GameCardDef }) {
   );
 }
 
-function formatTime(totalSeconds: number) {
-  const m = Math.floor(totalSeconds / 60);
-  const s = totalSeconds % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+/** Moves allowed after a threshold breach before the run ends (recovery gameplay). */
+const RECOVERY_GRACE_MOVES = 2;
+
+type MetricPulse = Partial<Record<RiskKey, "up" | "down">>;
+
+function StatMetricCard({
+  riskKey,
+  value,
+  pulse,
+  live,
+}: {
+  riskKey: RiskKey;
+  value: number;
+  pulse: MetricPulse;
+  live: boolean;
+}) {
+  const pulseDir = pulse[riskKey];
+
+  if (!live) {
+    return (
+      <div
+        className="stat-card stat-card--idle"
+        data-metric={riskKey}
+        aria-label={`${STAT_LABELS[riskKey]} — fills in when you add cards to the system`}
+      >
+        <span className="stat-label">{STAT_LABELS[riskKey]}</span>
+        <div className="stat-bar" aria-hidden>
+          <div className="stat-bar__fill stat-bar__fill--idle" style={{ width: "0%" }} />
+        </div>
+        <span className="stat-state stat-state--slot" aria-hidden />
+      </div>
+    );
+  }
+
+  const p = getMetricPresentation(riskKey, value);
+  const mod =
+    p.traffic === "green"
+      ? "stat-card--ok"
+      : p.traffic === "amber"
+        ? "stat-card--warn"
+        : "stat-card--bad";
+  const pulseClass =
+    pulseDir === "up"
+      ? " stat-card--pulse-up"
+      : pulseDir === "down"
+        ? " stat-card--pulse-down"
+        : "";
+
+  return (
+    <div
+      className={`stat-card ${mod}${pulseClass}`}
+      data-metric={riskKey}
+    >
+      <span className="stat-label">{STAT_LABELS[riskKey]}</span>
+      <div className="stat-bar" aria-hidden>
+        <div
+          className="stat-bar__fill"
+          style={{ width: `${Math.round(p.barFill * 100)}%` }}
+        />
+      </div>
+      <span className={`stat-state stat-state--${p.traffic}`}>{p.label}</span>
+    </div>
+  );
 }
 
 type SelectionSnapshot = {
@@ -264,7 +268,6 @@ type SelectionSnapshot = {
 export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [moves, setMoves] = useState(0);
-  const [seconds, setSeconds] = useState(91);
   const [selected_data, setSelected_data] = useState<string[]>([]);
   const [selected_models, setSelected_models] = useState<string[]>([]);
   const [selected_controls, setSelected_controls] = useState<string[]>([]);
@@ -288,15 +291,16 @@ export default function App() {
     [selection],
   );
 
-  const liveRiskStatements = useMemo(
-    () => getLiveRiskBulletStatements(selection),
-    [selection],
-  );
-
   const [deployFailureReasons, setDeployFailureReasons] = useState<string[] | null>(
     null,
   );
   const [deploySuccess, setDeploySuccess] = useState(false);
+  const [recoveryGraceRemaining, setRecoveryGraceRemaining] = useState<
+    number | null
+  >(null);
+  const [blueMessage, setBlueMessage] = useState("");
+  const [metricPulse, setMetricPulse] = useState<MetricPulse>({});
+  const pulseClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const gameOver = deployFailureReasons !== null;
 
@@ -306,11 +310,10 @@ export default function App() {
   }, [selection, moves]);
 
   useEffect(() => {
-    const id = window.setInterval(() => setSeconds((t) => t + 1), 1000);
-    return () => window.clearInterval(id);
+    return () => {
+      if (pulseClearRef.current) window.clearTimeout(pulseClearRef.current);
+    };
   }, []);
-
-  const timeLabel = formatTime(seconds);
 
   const systemDataId = selected_data[0] ?? null;
   const systemModelId = selected_models[0] ?? null;
@@ -327,84 +330,157 @@ export default function App() {
   /** 0 = need data, 1 = need model, 2 = controls phase */
   const buildStep = !systemDataId ? 0 : !systemModelId ? 1 : 2;
 
-  const expectedPillar: Pillar | null =
-    buildStep === 0 ? "DATA" : buildStep === 1 ? "MODEL" : "CONTROL";
+  const hasSystemContent =
+    selected_data.length > 0 ||
+    selected_models.length > 0 ||
+    selected_controls.length > 0;
 
-  const subheaderContent = useMemo(() => {
-    if (deploySuccess) {
-      return {
-        tip: "Deployed successfully — risks within thresholds.",
-        next: null as string | null,
-      };
-    }
-    if (gameOver) {
-      return {
-        tip: "Deployment failed. Use the dialog to undo or restart.",
-        next: null as string | null,
-      };
-    }
-    if (buildStep === 0) {
-      return {
-        tip: "Stacks run in three layers—data, then model, then controls. Your data source decides what the system learns from and drives quality, bias, and privacy before anything else runs.",
-        next: "Next — Data card.",
-      };
-    }
-    if (buildStep === 1) {
-      const d = systemDataId ? CARD_BY_ID[systemDataId] : undefined;
-      return {
-        tip:
-          d?.learningBlurb ??
-          "Your data source is locked in. The model will read from this layer.",
-        next: "Next — Model card.",
-      };
-    }
-    const m = systemModelId ? CARD_BY_ID[systemModelId] : undefined;
-    const lastControlId =
-      selected_controls.length > 0
-        ? selected_controls[selected_controls.length - 1]
-        : undefined;
-    const lastControl = lastControlId ? CARD_BY_ID[lastControlId] : undefined;
-    return {
-      tip:
-        lastControl?.learningBlurb ??
-        m?.learningBlurb ??
-        "Controls reduce risk after data and model are connected.",
-      next: "Next — Control card.",
-    };
+  const systemTier = useMemo(
+    () => getSystemStateTier(risks, unsafeNoHumanOversight),
+    [risks, unsafeNoHumanOversight],
+  );
+
+  const headlineTier = !hasSystemContent ? ("stable" as const) : systemTier;
+
+  const deployViolationsNow = useMemo(
+    () => hasDeployViolations(risks, selection, unsafeNoHumanOversight),
+    [risks, selection, unsafeNoHumanOversight],
+  );
+
+  const successSummary = useMemo(
+    () =>
+      deploySuccess
+        ? buildEndgameSummary(
+            true,
+            risks,
+            selection,
+            unsafeNoHumanOversight,
+            [],
+          )
+        : null,
+    [deploySuccess, risks, selection, unsafeNoHumanOversight],
+  );
+
+  const failureSummary = useMemo(() => {
+    if (!gameOver || !deployFailureReasons) return null;
+    return buildEndgameSummary(
+      false,
+      risks,
+      selection,
+      unsafeNoHumanOversight,
+      deployFailureReasons,
+    );
   }, [
-    buildStep,
-    deploySuccess,
     gameOver,
-    selected_controls,
-    systemDataId,
-    systemModelId,
+    deployFailureReasons,
+    risks,
+    selection,
+    unsafeNoHumanOversight,
   ]);
+
+  const recoveryGraceRef = useRef<number | null>(null);
+  useEffect(() => {
+    recoveryGraceRef.current = recoveryGraceRemaining;
+  }, [recoveryGraceRemaining]);
+
+  function triggerMetricPulse(delta: Partial<Record<RiskKey, number>>) {
+    const nextPulse: MetricPulse = {};
+    for (const k of RISK_ORDER) {
+      const d = delta[k];
+      if (d == null || d === 0) continue;
+      nextPulse[k] = d > 0 ? "up" : "down";
+    }
+    setMetricPulse(nextPulse);
+    if (pulseClearRef.current) window.clearTimeout(pulseClearRef.current);
+    pulseClearRef.current = window.setTimeout(() => setMetricPulse({}), 900);
+  }
+
+  function runPostPlacement(
+    prevSel: GameSelection,
+    nextSel: GameSelection,
+    cardId: string,
+    cardTitle: string,
+    cardType: CardType,
+  ) {
+    const prevResult = computeGameState(prevSel);
+    const nextResult = computeGameState(nextSel);
+    const delta = riskDelta(prevResult.risks, nextResult.risks);
+    setBlueMessage(getComponentProConMessage(cardId, cardTitle, cardType));
+    triggerMetricPulse(delta);
+
+    const violated = hasDeployViolations(
+      nextResult.risks,
+      nextSel,
+      nextResult.unsafeNoHumanOversight,
+    );
+    const wasViolated = hasDeployViolations(
+      prevResult.risks,
+      prevSel,
+      prevResult.unsafeNoHumanOversight,
+    );
+
+    if (!violated) {
+      setRecoveryGraceRemaining(null);
+      return;
+    }
+    if (!wasViolated) {
+      setRecoveryGraceRemaining(RECOVERY_GRACE_MOVES);
+      return;
+    }
+    const cur = recoveryGraceRef.current ?? RECOVERY_GRACE_MOVES;
+    const nextG = cur - 1;
+    if (nextG < 0) {
+      setDeployFailureReasons(
+        getGameOverReasons(
+          nextResult.risks,
+          nextSel,
+          nextResult.unsafeNoHumanOversight,
+        ),
+      );
+      setRecoveryGraceRemaining(0);
+    } else {
+      setRecoveryGraceRemaining(nextG);
+    }
+  }
 
   function pillarAllowedInSystem(p: Pillar): boolean {
     if (gameOver || deploySuccess) return false;
-    return p === expectedPillar;
+    if (p === "DATA") return buildStep === 0;
+    if (p === "MODEL") return buildStep === 1;
+    if (p === "CONTROL") return buildStep === 2;
+    return false;
   }
 
   function canDragCardToSystem(card: GameCardDef): boolean {
     if (gameOver || deploySuccess) return false;
-    return card.pillar === expectedPillar;
+    if (card.pillar === "DATA") return buildStep === 0;
+    if (card.pillar === "MODEL") return buildStep === 1;
+    return buildStep === 2;
   }
 
   function handleDeploy() {
     const reasons = getGameOverReasons(risks, selection, unsafeNoHumanOversight);
     if (reasons.length > 0) {
-      setDeployFailureReasons(reasons);
+      setBlueMessage(
+        "Deploy is locked until every meter is in a safe band — adjust the stack, then try again.",
+      );
       return;
     }
     setDeploySuccess(true);
     setDeployFailureReasons(null);
+    setRecoveryGraceRemaining(null);
   }
 
   function handleGameOverUndo() {
     setDeployFailureReasons(null);
+    setRecoveryGraceRemaining(null);
     if (undoStack.length > 0) {
       undoLastMove();
     }
+  }
+
+  function dismissSuccessSummary() {
+    setDeploySuccess(false);
   }
 
   function saveSnapshotBeforeMove() {
@@ -422,6 +498,10 @@ export default function App() {
   }
 
   function undoLastMove() {
+    setRecoveryGraceRemaining(null);
+    setBlueMessage(
+      "Undid the last drop — meters match the earlier stack; drop a card to refresh this line.",
+    );
     setUndoStack((stack) => {
       if (stack.length === 0) return stack;
       const snap = stack[stack.length - 1];
@@ -434,7 +514,6 @@ export default function App() {
   }
 
   function fullReset() {
-    setSeconds(91);
     setSelectedId(null);
     setSelected_data([]);
     setSelected_models([]);
@@ -443,6 +522,9 @@ export default function App() {
     setUndoStack([]);
     setDeployFailureReasons(null);
     setDeploySuccess(false);
+    setRecoveryGraceRemaining(null);
+    setBlueMessage("");
+    setMetricPulse({});
   }
 
   function handleSelect(id: string) {
@@ -479,9 +561,18 @@ export default function App() {
 
   function applyDataToSystem(payload: { id: string; pillar: Pillar }) {
     if (payload.pillar !== "DATA" || buildStep !== 0) return;
+    const prevSel: GameSelection = { ...selectionRef.current };
+    const def = CARD_BY_ID[payload.id];
+    const nextSel: GameSelection = {
+      selected_data: [payload.id],
+      selected_models: [],
+      selected_controls: [],
+    };
     saveSnapshotBeforeMove();
-    setSelected_data([payload.id]);
-    setSelected_models([]);
+    runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
+    setSelected_data(nextSel.selected_data);
+    setSelected_models(nextSel.selected_models);
+    setSelected_controls(nextSel.selected_controls);
     setDeploySuccess(false);
     setMoves((m) => m + 1);
     dragPillarRef.current = null;
@@ -490,7 +581,15 @@ export default function App() {
 
   function applyModelToSystem(payload: { id: string; pillar: Pillar }) {
     if (payload.pillar !== "MODEL" || buildStep !== 1) return;
+    const prevSel: GameSelection = { ...selectionRef.current };
+    const def = CARD_BY_ID[payload.id];
+    const nextSel: GameSelection = {
+      selected_data: [...prevSel.selected_data],
+      selected_models: [payload.id],
+      selected_controls: [...prevSel.selected_controls],
+    };
     saveSnapshotBeforeMove();
+    runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
     setSelected_models([payload.id]);
     setDeploySuccess(false);
     setMoves((m) => m + 1);
@@ -500,14 +599,20 @@ export default function App() {
 
   function applyControlToSystem(payload: { id: string; pillar: Pillar }) {
     if (payload.pillar !== "CONTROL" || buildStep !== 2) return;
-    const prev = selectionRef.current.selected_controls;
-    if (prev.includes(payload.id)) {
+    const prevSel: GameSelection = { ...selectionRef.current };
+    if (prevSel.selected_controls.includes(payload.id)) {
       dragPillarRef.current = null;
       setDragging(null);
       return;
     }
+    const def = CARD_BY_ID[payload.id];
+    const nextSel: GameSelection = {
+      ...prevSel,
+      selected_controls: [...prevSel.selected_controls, payload.id],
+    };
     saveSnapshotBeforeMove();
-    setSelected_controls((p) => [...p, payload.id]);
+    runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
+    setSelected_controls(nextSel.selected_controls);
     setDeploySuccess(false);
     setMoves((m) => m + 1);
     dragPillarRef.current = null;
@@ -532,20 +637,23 @@ export default function App() {
     }
   }
 
-  const hasSystemContent =
-    Boolean(placedData) ||
-    Boolean(placedModel) ||
-    selected_controls.length > 0;
+  const connectedNoControls =
+    Boolean(placedData && placedModel && selected_controls.length === 0);
 
   const draggingAllowed =
-    Boolean(dragging) &&
-    expectedPillar !== null &&
-    dragging === expectedPillar;
+    dragging != null && pillarAllowedInSystem(dragging);
 
   const systemZoneClass =
     "system-zone" +
     (draggingAllowed ? " system-zone--drop-ready" : "") +
-    (hasSystemContent ? " system-zone--has-stack" : "");
+    (hasSystemContent ? " system-zone--has-stack" : "") +
+    (headlineTier === "unstable" &&
+    hasSystemContent &&
+    !gameOver &&
+    !deploySuccess
+      ? " system-zone--unstable"
+      : "") +
+    (connectedNoControls && !deploySuccess ? " system-zone--unshielded" : "");
 
   const systemZoneAria =
     buildStep === 0
@@ -553,6 +661,20 @@ export default function App() {
       : buildStep === 1
         ? "System: drop a Model card here next."
         : "System: drop Control cards here, then Deploy when ready.";
+
+  const activeLaneSet = useMemo(() => {
+    if (gameOver || deploySuccess) return new Set<Pillar>();
+    if (buildStep === 0) return new Set<Pillar>(["DATA"]);
+    if (buildStep === 1) return new Set<Pillar>(["MODEL"]);
+    return new Set<Pillar>(["CONTROL"]);
+  }, [buildStep, deploySuccess, gameOver]);
+
+  function columnClass(pillar: Pillar) {
+    return (
+      "column" +
+      (activeLaneSet.has(pillar) ? " column--needs-action" : "")
+    );
+  }
 
   return (
     <div className="app">
@@ -568,20 +690,6 @@ export default function App() {
             </p>
           </div>
         </div>
-        <div className="header-metrics">
-          <div className="metric">
-            <span className="metric-label">STABILITY</span>
-            <span className="metric-value metric-value--mint">50%</span>
-          </div>
-          <div className="metric">
-            <span className="metric-label">MOVES</span>
-            <span className="metric-value">{moves}</span>
-          </div>
-          <div className="metric">
-            <span className="metric-label">TIME</span>
-            <span className="metric-value">{timeLabel}</span>
-          </div>
-        </div>
         <button
           type="button"
           className="header-palette"
@@ -589,30 +697,47 @@ export default function App() {
         />
       </header>
 
-      <div className={`subheader${gameOver ? " subheader--alert" : ""}`}>
-        {subheaderContent.tip && (
-          <p
-            className="subheader-tip"
-            aria-live={gameOver ? "assertive" : "polite"}
-          >
-            {subheaderContent.tip}
-          </p>
-        )}
-        {subheaderContent.next && (
-          <p className="subheader-next">{subheaderContent.next}</p>
-        )}
+      <div
+        className={`subheader subheader--narrative${
+          gameOver ? " subheader--alert" : ""
+        }${
+          headlineTier === "unstable" &&
+          hasSystemContent &&
+          !gameOver &&
+          !deploySuccess
+            ? " subheader--unstable"
+            : ""
+        }`}
+        role="region"
+        aria-label="Scenario or component trade-off"
+      >
+        <p
+          className="subheader-single"
+          aria-live={gameOver ? "assertive" : "polite"}
+        >
+          {gameOver
+            ? "Run ended — limits held; undo or restart from the dialog (details in the overlay)."
+            : deploySuccess
+              ? "Deploy cleared — open the summary overlay for domain feedback and insights."
+              : !hasSystemContent
+                ? SCENARIO_ONLY
+                : blueMessage ||
+                  "Drop a card into System to see that component's trade-offs here."}
+        </p>
       </div>
 
       <section
         className="stats-row"
-        aria-label="Requirements and limits"
+        aria-label="System pressure by dimension"
       >
         {RISK_ORDER.map((key) => (
-          <div key={key} className="stat-card">
-            <span className="stat-label">{STAT_LABELS[key]}</span>
-            <span className="stat-value">{risks[key]}</span>
-            <span className="stat-foot">{STAT_FOOTERS[key]}</span>
-          </div>
+          <StatMetricCard
+            key={key}
+            riskKey={key}
+            value={risks[key]}
+            pulse={metricPulse}
+            live={hasSystemContent}
+          />
         ))}
       </section>
 
@@ -697,8 +822,19 @@ export default function App() {
                     <div className="system-zone__deploy">
                       <button
                         type="button"
-                        className="system-deploy-btn"
+                        className={
+                          "system-deploy-btn" +
+                          (deployViolationsNow
+                            ? " system-deploy-btn--blocked"
+                            : "")
+                        }
                         onClick={handleDeploy}
+                        disabled={deployViolationsNow}
+                        title={
+                          deployViolationsNow
+                            ? "Stabilise the system before deploy."
+                            : undefined
+                        }
                       >
                         <Rocket
                           className="system-deploy-btn__icon"
@@ -724,9 +860,12 @@ export default function App() {
           <div
             className="board"
             role="group"
-            aria-label="Data, model, controls, and risks"
+            aria-label="Data, model, and controls"
           >
-            <div className="column">
+            <div
+              className={columnClass("DATA")}
+              data-active-lane={activeLaneSet.has("DATA") ? "true" : undefined}
+            >
               <h2 className="column-title">Data</h2>
               {DATA_CARDS.filter((c) => !selected_data.includes(c.id)).map(
                 (c) => (
@@ -742,7 +881,10 @@ export default function App() {
                 ),
               )}
             </div>
-            <div className="column">
+            <div
+              className={columnClass("MODEL")}
+              data-active-lane={activeLaneSet.has("MODEL") ? "true" : undefined}
+            >
               <h2 className="column-title">Model</h2>
               {MODEL_CARDS.filter((c) => !selected_models.includes(c.id)).map(
                 (c) => (
@@ -758,7 +900,10 @@ export default function App() {
                 ),
               )}
             </div>
-            <div className="column">
+            <div
+              className={columnClass("CONTROL")}
+              data-active-lane={activeLaneSet.has("CONTROL") ? "true" : undefined}
+            >
               <h2 className="column-title">Controls</h2>
               {CONTROL_CARDS.filter((c) => !selected_controls.includes(c.id)).map(
                 (c) => (
@@ -774,13 +919,6 @@ export default function App() {
                 ),
               )}
             </div>
-            <div className="column">
-              <h2 className="column-title">Risks</h2>
-              <LiveRisksPanel
-                statements={liveRiskStatements}
-                hasBuild={hasSystemContent}
-              />
-            </div>
           </div>
         </div>
 
@@ -792,11 +930,30 @@ export default function App() {
             aria-labelledby="game-over-title"
           >
             <div className="game-over-panel">
-              <h2 id="game-over-title">Deployment failed</h2>
+              <h2 id="game-over-title">Run ended — limits held</h2>
               <p className="game-over-lead">
-                Thresholds exceeded. Adjust your stack or undo.
+                The recovery window closed before the stack came back in range.
               </p>
-              <ul>
+              {failureSummary && (
+                <>
+                  <p className="game-over-section-label">Readout</p>
+                  <ul className="game-over-domains">
+                    {failureSummary.domains.map((d) => (
+                      <li key={d.id}>{d.blurb}</li>
+                    ))}
+                  </ul>
+                  <p className="game-over-section-label">Insights</p>
+                  <ul className="game-over-insights">
+                    {failureSummary.insights.map((line, i) => (
+                      <li key={`in-${i}`}>{line}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              <p className="game-over-section-label game-over-section-label--muted">
+                Technical detail
+              </p>
+              <ul className="game-over-technical">
                 {deployFailureReasons.map((r, i) => (
                   <li key={`${i}-${r}`}>{r}</li>
                 ))}
@@ -817,6 +974,51 @@ export default function App() {
                   onClick={fullReset}
                 >
                   Start again
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {deploySuccess && successSummary && (
+          <div
+            className="success-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="success-title"
+          >
+            <div className="success-panel">
+              <h2 id="success-title">Deploy cleared</h2>
+              <p className="success-lead">
+                Outcome: success. Here is how the build reads—still no live scores,
+                just narrative readouts.
+              </p>
+              <p className="success-section-label">Domains</p>
+              <ul className="success-domains">
+                {successSummary.domains.map((d) => (
+                  <li key={d.id}>{d.blurb}</li>
+                ))}
+              </ul>
+              <p className="success-section-label">Insights</p>
+              <ul className="success-insights">
+                {successSummary.insights.map((line, i) => (
+                  <li key={`s-${i}`}>{line}</li>
+                ))}
+              </ul>
+              <div className="success-actions">
+                <button
+                  type="button"
+                  className="success-btn-primary"
+                  onClick={fullReset}
+                >
+                  New run
+                </button>
+                <button
+                  type="button"
+                  className="success-btn-secondary"
+                  onClick={dismissSuccessSummary}
+                >
+                  Close summary
                 </button>
               </div>
             </div>
