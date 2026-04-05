@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+dist-ssr/
+
+# Local / secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs / debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# TypeScript
+*.tsbuildinfo
+
+# Vite
+.vite/
+
+# Optional: uncomment if you use test coverage
+# coverage/
