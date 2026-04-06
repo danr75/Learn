@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
+  Layers,
   Lightbulb,
   Link2,
   Menu,
@@ -37,6 +38,8 @@ import {
   STAT_LABELS,
   type RiskKey,
   type SystemStateTier,
+  cardBenchStrength,
+  weakestOfferId,
 } from "./gameEngine";
 import "./App.css";
 
@@ -75,18 +78,6 @@ function toViewCard(c: CardDefinition): GameCardDef {
   };
 }
 
-const DATA_CARDS: GameCardDef[] = CARD_DEFINITIONS.filter(
-  (c) => c.type === "data",
-).map(toViewCard);
-
-const MODEL_CARDS: GameCardDef[] = CARD_DEFINITIONS.filter(
-  (c) => c.type === "model",
-).map(toViewCard);
-
-const CONTROL_CARDS: GameCardDef[] = CARD_DEFINITIONS.filter(
-  (c) => c.type === "control",
-).map(toViewCard);
-
 const RISK_ORDER: RiskKey[] = [
   "quality",
   "bias",
@@ -95,11 +86,7 @@ const RISK_ORDER: RiskKey[] = [
   "hallucination",
 ];
 
-const ALL_LANE_CARDS: GameCardDef[] = [
-  ...DATA_CARDS,
-  ...MODEL_CARDS,
-  ...CONTROL_CARDS,
-];
+const ALL_LANE_CARDS: GameCardDef[] = CARD_DEFINITIONS.map(toViewCard);
 
 function findViewCard(id: string): GameCardDef | undefined {
   return ALL_LANE_CARDS.find((c) => c.id === id);
@@ -122,6 +109,66 @@ function makeSeededRng(seed: string) {
   return () => {
     state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
     return state / 0xffffffff;
+  };
+}
+
+type LaneBundle = {
+  visible: Record<Pillar, string[]>;
+  deck: Record<Pillar, string[]>;
+};
+
+type DrawPileAnimState = {
+  pillar: Pillar;
+  weakestId: string;
+  drawnId: string;
+  phase: "highlight" | "fadeOut" | "entering";
+};
+
+function shuffleStringArray(ids: string[], seed: string): string[] {
+  const arr = [...ids];
+  const rnd = makeSeededRng(seed);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/** Up to 2 face-up; rest in pile. If a pillar has only 2 cards total, use 1 + 1 so the draw pile stays usable. */
+function splitVisibleAndDeck(ids: string[]): { visible: string[]; deck: string[] } {
+  if (ids.length === 0) return { visible: [], deck: [] };
+  if (ids.length === 1) return { visible: [...ids], deck: [] };
+  if (ids.length === 2) return { visible: ids.slice(0, 1), deck: ids.slice(1) };
+  return { visible: ids.slice(0, 2), deck: ids.slice(2) };
+}
+
+function createInitialLanes(): LaneBundle {
+  const dataIds = shuffleStringArray(
+    CARD_DEFINITIONS.filter((c) => c.type === "data").map((c) => c.id),
+    "lane-init:data",
+  );
+  const modelIds = shuffleStringArray(
+    CARD_DEFINITIONS.filter((c) => c.type === "model").map((c) => c.id),
+    "lane-init:model",
+  );
+  const controlIds = shuffleStringArray(
+    CARD_DEFINITIONS.filter((c) => c.type === "control").map((c) => c.id),
+    "lane-init:control",
+  );
+  const dataSplit = splitVisibleAndDeck(dataIds);
+  const modelSplit = splitVisibleAndDeck(modelIds);
+  const controlSplit = splitVisibleAndDeck(controlIds);
+  return {
+    visible: {
+      DATA: dataSplit.visible,
+      MODEL: modelSplit.visible,
+      CONTROL: controlSplit.visible,
+    },
+    deck: {
+      DATA: dataSplit.deck,
+      MODEL: modelSplit.deck,
+      CONTROL: controlSplit.deck,
+    },
   };
 }
 
@@ -261,6 +308,9 @@ function GameCard({
   draggable = false,
   onDragStart,
   onDragEnd,
+  drawPileWeakestEdge = false,
+  drawPileFadeOut = false,
+  drawPileEnter = false,
 }: {
   card: GameCardDef;
   selected: boolean;
@@ -269,6 +319,10 @@ function GameCard({
   draggable?: boolean;
   onDragStart?: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd?: (e: React.DragEvent<HTMLDivElement>) => void;
+  /** Yellow edge only during Draw pile animation for this card (weakest). */
+  drawPileWeakestEdge?: boolean;
+  drawPileFadeOut?: boolean;
+  drawPileEnter?: boolean;
 }) {
   const mod =
     card.pillar === "DATA"
@@ -299,7 +353,7 @@ function GameCard({
 
   return (
     <div
-      className={`game-card ${mod}${selected ? " game-card--selected" : ""}${draggable ? " game-card--draggable" : " game-card--lane-locked"}`}
+      className={`game-card ${mod}${selected ? " game-card--selected" : ""}${draggable ? " game-card--draggable" : " game-card--lane-locked"}${drawPileWeakestEdge ? " game-card--weakest-takeout" : ""}${drawPileFadeOut ? " game-card--draw-fade-out" : ""}${drawPileEnter ? " game-card--draw-enter" : ""}`}
       role="group"
       aria-labelledby={titleId}
       draggable={draggable}
@@ -408,6 +462,21 @@ export default function App() {
   const [deployUnstableOutcome, setDeployUnstableOutcome] = useState(false);
   const [deployPlanksCollapse, setDeployPlanksCollapse] = useState(false);
   const deployWalkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [laneState, setLaneState] = useState<LaneBundle>(() =>
+    createInitialLanes(),
+  );
+  const [drawPileUsedByPillar, setDrawPileUsedByPillar] = useState<
+    Record<Pillar, boolean>
+  >({
+    DATA: false,
+    MODEL: false,
+    CONTROL: false,
+  });
+  const [drawPileAnim, setDrawPileAnim] = useState<DrawPileAnimState | null>(
+    null,
+  );
+  const drawAnimTimersRef = useRef<number[]>([]);
+  const drawPileRunningRef = useRef(false);
 
   useEffect(() => {
     selectionRef.current = selection;
@@ -416,6 +485,9 @@ export default function App() {
   useEffect(() => {
     return () => {
       clearDeployAnimTimers();
+      drawAnimTimersRef.current.forEach((id) => window.clearTimeout(id));
+      drawAnimTimersRef.current = [];
+      drawPileRunningRef.current = false;
     };
   }, []);
 
@@ -630,7 +702,166 @@ export default function App() {
     setDeployWalk(null);
     setDeployUnstableOutcome(false);
     setDeployPlanksCollapse(false);
+    setLaneState(createInitialLanes());
+    setDrawPileUsedByPillar({
+      DATA: false,
+      MODEL: false,
+      CONTROL: false,
+    });
+    setDrawPileAnim(null);
+    drawAnimTimersRef.current.forEach((id) => window.clearTimeout(id));
+    drawAnimTimersRef.current = [];
+    drawPileRunningRef.current = false;
     clearDragState();
+  }
+
+  function consumeLaneCard(pillar: Pillar, placedId: string) {
+    setLaneState((prev) => {
+      const vis = prev.visible[pillar].filter((id) => id !== placedId);
+      const deck = [...prev.deck[pillar]];
+      const nextVis = [...vis];
+      while (nextVis.length < 2 && deck.length > 0) {
+        nextVis.push(deck.shift()!);
+      }
+      return {
+        visible: { ...prev.visible, [pillar]: nextVis },
+        deck: { ...prev.deck, [pillar]: deck },
+      };
+    });
+  }
+
+  function returnCardToLane(pillar: Pillar, cardId: string) {
+    setLaneState((prev) => {
+      const deck = [cardId, ...prev.deck[pillar]];
+      const nextVis = [...prev.visible[pillar]];
+      const d = [...deck];
+      while (nextVis.length < 2 && d.length > 0) {
+        nextVis.push(d.shift()!);
+      }
+      return {
+        visible: { ...prev.visible, [pillar]: nextVis },
+        deck: { ...prev.deck, [pillar]: d },
+      };
+    });
+  }
+
+  function clearDrawAnimTimers() {
+    drawAnimTimersRef.current.forEach((id) => window.clearTimeout(id));
+    drawAnimTimersRef.current = [];
+  }
+
+  function handleDrawPile(pillar: Pillar) {
+    if (
+      drawPileUsedByPillar[pillar] ||
+      deploySuccess ||
+      drawPileAnim ||
+      drawPileRunningRef.current
+    )
+      return;
+    clearDrawAnimTimers();
+
+    setLaneState((prev) => {
+      const vis = [...prev.visible[pillar]];
+      const deck = [...prev.deck[pillar]];
+      if (vis.length === 0 || deck.length === 0) return prev;
+      const weakest = weakestOfferId(vis);
+      if (!weakest) return prev;
+      if (drawPileRunningRef.current) return prev;
+      drawPileRunningRef.current = true;
+      const without = vis.filter((id) => id !== weakest);
+      const pool = [...deck, weakest];
+      const ri = Math.floor(Math.random() * pool.length);
+      const drawn = pool[ri];
+      const newDeck = pool.filter((_, i) => i !== ri);
+      const nextVis = [...without, drawn];
+      const wDef = CARD_BY_ID[weakest];
+      const dDef = CARD_BY_ID[drawn];
+
+      queueMicrotask(() => {
+        setDrawPileAnim({
+          pillar,
+          weakestId: weakest,
+          drawnId: drawn,
+          phase: "highlight",
+        });
+        const t1 = window.setTimeout(() => {
+          setDrawPileAnim({
+            pillar,
+            weakestId: weakest,
+            drawnId: drawn,
+            phase: "fadeOut",
+          });
+        }, 170);
+        const t2 = window.setTimeout(() => {
+          setLaneState((p) => ({
+            visible: { ...p.visible, [pillar]: nextVis },
+            deck: { ...p.deck, [pillar]: newDeck },
+          }));
+          setDrawPileAnim({
+            pillar,
+            weakestId: weakest,
+            drawnId: drawn,
+            phase: "entering",
+          });
+        }, 170 + 400);
+        const t3 = window.setTimeout(() => {
+          setDrawPileAnim(null);
+          const stronger =
+            cardBenchStrength(dDef) >= cardBenchStrength(wDef);
+          setBlueMessage(
+            stronger
+              ? "Your draw card makes your options stronger."
+              : "Your draw card made your options weaker.",
+          );
+          setDrawPileUsedByPillar((prev) => ({ ...prev, [pillar]: true }));
+          drawPileRunningRef.current = false;
+        }, 170 + 400 + 520);
+        drawAnimTimersRef.current = [t1, t2, t3];
+      });
+
+      return prev;
+    });
+  }
+
+  function canUseDrawPile(pillar: Pillar): boolean {
+    const laneMatchesBuildStep =
+      (pillar === "DATA" && buildStep === 0) ||
+      (pillar === "MODEL" && buildStep === 1) ||
+      (pillar === "CONTROL" && buildStep === 2);
+    return (
+      !deploySuccess &&
+      !drawPileUsedByPillar[pillar] &&
+      drawPileAnim === null &&
+      laneMatchesBuildStep &&
+      laneState.visible[pillar].length > 0 &&
+      laneState.deck[pillar].length > 0
+    );
+  }
+
+  function drawPileCardProps(
+    pillar: Pillar,
+    cid: string,
+  ): {
+    drawPileWeakestEdge: boolean;
+    drawPileFadeOut: boolean;
+    drawPileEnter: boolean;
+  } {
+    if (!drawPileAnim || drawPileAnim.pillar !== pillar) {
+      return {
+        drawPileWeakestEdge: false,
+        drawPileFadeOut: false,
+        drawPileEnter: false,
+      };
+    }
+    const { weakestId, drawnId, phase } = drawPileAnim;
+    const isWeakest = cid === weakestId;
+    const isDrawn = cid === drawnId;
+    return {
+      drawPileWeakestEdge:
+        isWeakest && (phase === "highlight" || phase === "fadeOut"),
+      drawPileFadeOut: isWeakest && phase === "fadeOut",
+      drawPileEnter: isDrawn && phase === "entering",
+    };
   }
 
   function handleSelect(id: string) {
@@ -709,6 +940,7 @@ export default function App() {
     setSelected_data(nextSel.selected_data);
     setSelected_models(nextSel.selected_models);
     setSelected_controls(nextSel.selected_controls);
+    consumeLaneCard("DATA", payload.id);
     setDeploySuccess(false);
     clearDragState();
   }
@@ -724,6 +956,7 @@ export default function App() {
     };
     runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
     setSelected_models([payload.id]);
+    consumeLaneCard("MODEL", payload.id);
     setDeploySuccess(false);
     clearDragState();
   }
@@ -742,6 +975,7 @@ export default function App() {
     };
     runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
     setSelected_controls(nextSel.selected_controls);
+    consumeLaneCard("CONTROL", payload.id);
     setDeploySuccess(false);
     clearDragState();
   }
@@ -797,6 +1031,7 @@ export default function App() {
     setSelected_data(nextSel.selected_data);
     setSelected_models(nextSel.selected_models);
     setSelected_controls(nextSel.selected_controls);
+    returnCardToLane("DATA", payload.id);
   }
 
   function removeModelFromSystem(payload: { id: string; pillar: Pillar }) {
@@ -810,6 +1045,7 @@ export default function App() {
     removePlacedFromSystem(prevSel, nextSel);
     setSelected_models(nextSel.selected_models);
     setSelected_controls(nextSel.selected_controls);
+    returnCardToLane("MODEL", payload.id);
   }
 
   function removeControlFromSystem(payload: { id: string; pillar: Pillar }) {
@@ -824,6 +1060,7 @@ export default function App() {
     };
     removePlacedFromSystem(prevSel, nextSel);
     setSelected_controls(nextSel.selected_controls);
+    returnCardToLane("CONTROL", payload.id);
   }
 
   function handleColumnDragOver(pillar: Pillar) {
@@ -917,9 +1154,12 @@ export default function App() {
         </div>
         <button
           type="button"
-          className="header-palette"
-          aria-label="Theme palette"
-        />
+          className="menu-btn app-header__settings-btn"
+          aria-label="Settings"
+          title="Settings"
+        >
+          <Settings size={20} strokeWidth={1.5} aria-hidden />
+        </button>
       </header>
 
       {!(deploySuccess && deployUnstableOutcome) && (
@@ -932,7 +1172,7 @@ export default function App() {
           role="region"
           aria-label="Scenario or component trade-off"
         >
-          <p className="subheader-single" aria-live="polite">
+          <p className="subheader-single subheader-single--pre" aria-live="polite">
             {deploySuccess
               ? "Deploy cleared — open the summary overlay for domain feedback and insights."
               : blueMessage !== ""
@@ -1109,22 +1349,41 @@ export default function App() {
               onDrop={handleColumnDrop("DATA")}
             >
               <h2 className="column-title">Data</h2>
-              {DATA_CARDS.filter((c) => !selected_data.includes(c.id)).map(
-                (c) => (
-                  <GameCard
-                    key={c.id}
-                    card={c}
-                    selected={selectedId === c.id}
-                    onSelect={() => handleSelect(c.id)}
-                    onCardHint={() =>
-                      setBlueMessage(`${c.title} — ${c.learningBlurb}`)
-                    }
-                    draggable={canDragCardToSystem(c)}
-                    onDragStart={handleLaneDragStart(c)}
-                    onDragEnd={handleLaneDragEnd}
-                  />
-                ),
-              )}
+              <div className="column__cards">
+                {laneState.visible.DATA.map((cid) => {
+                  const c = findViewCard(cid);
+                  if (!c) return null;
+                  return (
+                    <GameCard
+                      key={c.id}
+                      card={c}
+                      selected={selectedId === c.id}
+                      onSelect={() => handleSelect(c.id)}
+                      onCardHint={() =>
+                        setBlueMessage(`${c.title} — ${c.learningBlurb}`)
+                      }
+                      draggable={canDragCardToSystem(c)}
+                      onDragStart={handleLaneDragStart(c)}
+                      onDragEnd={handleLaneDragEnd}
+                      {...drawPileCardProps("DATA", cid)}
+                    />
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                className="column-draw"
+                disabled={!canUseDrawPile("DATA")}
+                onClick={() => handleDrawPile("DATA")}
+                aria-label="Data draw pile: while the Data column is active, removes the weakest visible card, then draws a random card from the pile. One use per column."
+                title="Available while Data is the active column. Removes the weakest visible card, then draws a random card from the pile (once per column)."
+              >
+                <Layers className="column-draw__icon" strokeWidth={1.5} aria-hidden />
+                <span className="column-draw__label">Draw pile</span>
+                <span className="column-draw__meta">
+                  {laneState.deck.DATA.length} in pile
+                </span>
+              </button>
             </div>
             <div
               className={columnClass("MODEL")}
@@ -1133,22 +1392,41 @@ export default function App() {
               onDrop={handleColumnDrop("MODEL")}
             >
               <h2 className="column-title">Model</h2>
-              {MODEL_CARDS.filter((c) => !selected_models.includes(c.id)).map(
-                (c) => (
-                  <GameCard
-                    key={c.id}
-                    card={c}
-                    selected={selectedId === c.id}
-                    onSelect={() => handleSelect(c.id)}
-                    onCardHint={() =>
-                      setBlueMessage(`${c.title} — ${c.learningBlurb}`)
-                    }
-                    draggable={canDragCardToSystem(c)}
-                    onDragStart={handleLaneDragStart(c)}
-                    onDragEnd={handleLaneDragEnd}
-                  />
-                ),
-              )}
+              <div className="column__cards">
+                {laneState.visible.MODEL.map((cid) => {
+                  const c = findViewCard(cid);
+                  if (!c) return null;
+                  return (
+                    <GameCard
+                      key={c.id}
+                      card={c}
+                      selected={selectedId === c.id}
+                      onSelect={() => handleSelect(c.id)}
+                      onCardHint={() =>
+                        setBlueMessage(`${c.title} — ${c.learningBlurb}`)
+                      }
+                      draggable={canDragCardToSystem(c)}
+                      onDragStart={handleLaneDragStart(c)}
+                      onDragEnd={handleLaneDragEnd}
+                      {...drawPileCardProps("MODEL", cid)}
+                    />
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                className="column-draw"
+                disabled={!canUseDrawPile("MODEL")}
+                onClick={() => handleDrawPile("MODEL")}
+                aria-label="Model draw pile: while the Model column is active, removes the weakest visible card, then draws a random card from the pile. One use per column."
+                title="Available while Model is the active column. Removes the weakest visible card, then draws a random card from the pile (once per column)."
+              >
+                <Layers className="column-draw__icon" strokeWidth={1.5} aria-hidden />
+                <span className="column-draw__label">Draw pile</span>
+                <span className="column-draw__meta">
+                  {laneState.deck.MODEL.length} in pile
+                </span>
+              </button>
             </div>
             <div
               className={columnClass("CONTROL")}
@@ -1157,22 +1435,41 @@ export default function App() {
               onDrop={handleColumnDrop("CONTROL")}
             >
               <h2 className="column-title">Controls</h2>
-              {CONTROL_CARDS.filter((c) => !selected_controls.includes(c.id)).map(
-                (c) => (
-                  <GameCard
-                    key={c.id}
-                    card={c}
-                    selected={selectedId === c.id}
-                    onSelect={() => handleSelect(c.id)}
-                    onCardHint={() =>
-                      setBlueMessage(`${c.title} — ${c.learningBlurb}`)
-                    }
-                    draggable={canDragCardToSystem(c)}
-                    onDragStart={handleLaneDragStart(c)}
-                    onDragEnd={handleLaneDragEnd}
-                  />
-                ),
-              )}
+              <div className="column__cards">
+                {laneState.visible.CONTROL.map((cid) => {
+                  const c = findViewCard(cid);
+                  if (!c) return null;
+                  return (
+                    <GameCard
+                      key={c.id}
+                      card={c}
+                      selected={selectedId === c.id}
+                      onSelect={() => handleSelect(c.id)}
+                      onCardHint={() =>
+                        setBlueMessage(`${c.title} — ${c.learningBlurb}`)
+                      }
+                      draggable={canDragCardToSystem(c)}
+                      onDragStart={handleLaneDragStart(c)}
+                      onDragEnd={handleLaneDragEnd}
+                      {...drawPileCardProps("CONTROL", cid)}
+                    />
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                className="column-draw"
+                disabled={!canUseDrawPile("CONTROL")}
+                onClick={() => handleDrawPile("CONTROL")}
+                aria-label="Controls draw pile: while the Controls column is active, removes the weakest visible card, then draws a random card from the pile. One use per column."
+                title="Available while Controls is the active column. Removes the weakest visible card, then draws a random card from the pile (once per column)."
+              >
+                <Layers className="column-draw__icon" strokeWidth={1.5} aria-hidden />
+                <span className="column-draw__label">Draw pile</span>
+                <span className="column-draw__meta">
+                  {laneState.deck.CONTROL.length} in pile
+                </span>
+              </button>
             </div>
           </div>
         </div>

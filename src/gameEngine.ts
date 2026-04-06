@@ -136,6 +136,35 @@ export const CARD_BY_ID: Record<string, CardDefinition> = Object.fromEntries(
   CARD_DEFINITIONS.map((c) => [c.id, c]),
 );
 
+/** Total effect magnitude; lower = weaker offer for draw-pile replacement. */
+export function cardBenchStrength(def: CardDefinition): number {
+  let s = 0;
+  for (const v of Object.values(def.effects)) {
+    s += Math.abs(v);
+  }
+  return s;
+}
+
+/** Pick weakest id (lowest bench strength). Tie: earliest in `ids`. */
+export function weakestOfferId(ids: string[]): string | null {
+  if (ids.length === 0) return null;
+  let weakest = ids[0];
+  const first = CARD_BY_ID[weakest];
+  if (!first) return null;
+  let minS = cardBenchStrength(first);
+  for (let i = 1; i < ids.length; i++) {
+    const id = ids[i];
+    const def = CARD_BY_ID[id];
+    if (!def) continue;
+    const s = cardBenchStrength(def);
+    if (s < minS) {
+      minS = s;
+      weakest = id;
+    }
+  }
+  return weakest;
+}
+
 /** Short risk lines for the Risks column (max seven words each). */
 const CARD_RISK_LINES: Record<string, readonly string[]> = {
   historical_data: [
