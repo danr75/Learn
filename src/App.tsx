@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Calendar,
   ChevronLeft,
@@ -33,6 +27,8 @@ import {
   getStructureFoundationVisual,
   getStructureModelWeightVisual,
   getSystemStateTier,
+  type StructureFoundationVisual,
+  type StructureModelWeightVisual,
   hasDeployViolations,
   riskDelta,
   STAT_LABELS,
@@ -101,6 +97,50 @@ const ALL_LANE_CARDS: GameCardDef[] = [
 
 function findViewCard(id: string): GameCardDef | undefined {
   return ALL_LANE_CARDS.find((c) => c.id === id);
+}
+
+/** One continuous bridge under data↔model; more slots = wider bar. */
+const BRICK_SLOTS = 10;
+
+function getStructureBrickCount(
+  tier: SystemStateTier,
+  controlCount: number,
+  foundation: StructureFoundationVisual,
+  modelWeight: StructureModelWeightVisual,
+  gameOver: boolean,
+  deploySuccess: boolean,
+): number {
+  if (deploySuccess) return BRICK_SLOTS;
+  if (gameOver) return 0;
+  let n = tier === "stable" ? 10 : tier === "at_risk" ? 6 : 2;
+  n = Math.min(BRICK_SLOTS, n + controlCount);
+  if (foundation === "strong") n = Math.min(BRICK_SLOTS, n + 1);
+  if (foundation === "weak") n = Math.max(0, n - 1);
+  if (modelWeight === "heavy") n = Math.max(0, n - 1);
+  if (modelWeight === "light") n = Math.min(BRICK_SLOTS, n + 1);
+  return Math.max(0, Math.min(BRICK_SLOTS, n));
+}
+
+function SystemContinuousBrickBridge({ filled }: { filled: number }) {
+  return (
+    <div className="system-chain__continuous-bridge__bricks" aria-hidden>
+      {Array.from({ length: BRICK_SLOTS }, (_, i) => {
+        const empty = i >= filled;
+        return (
+          <div
+            key={i}
+            className={
+              "system-brick-slot" +
+              (empty ? " system-brick-slot--empty" : "")
+            }
+          >
+            <span className="system-brick-shell" />
+            <span className="system-brick-body" />
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function parseCardDragPayload(e: React.DragEvent): {
@@ -338,6 +378,8 @@ export default function App() {
   const [structureImpactFlash, setStructureImpactFlash] = useState(false);
   const [metricPulse, setMetricPulse] = useState<MetricPulse>({});
   const pulseClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [deployWalk, setDeployWalk] = useState<"cross" | "fall" | null>(null);
+  const deployWalkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const gameOver = deployFailureReasons !== null;
 
@@ -349,6 +391,9 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (pulseClearRef.current) window.clearTimeout(pulseClearRef.current);
+      if (deployWalkTimerRef.current) {
+        window.clearTimeout(deployWalkTimerRef.current);
+      }
     };
   }, []);
 
@@ -408,51 +453,25 @@ export default function App() {
     [systemModelId],
   );
 
-  const towerSwingVars = useMemo((): CSSProperties => {
-    let tilt = 0;
-    let nudge = 0;
-    if (towerBuilt && !gameOver && !deploySuccess) {
-      if (structureVisualTier === "at_risk") {
-        tilt = 2.35;
-        nudge = 5;
-      } else if (structureVisualTier === "unstable") {
-        tilt = 5.1;
-        nudge = 10.5;
-      }
-      if (foundationVisual === "weak") {
-        tilt *= 1.18;
-        nudge *= 1.12;
-      } else if (foundationVisual === "strong") {
-        tilt *= 0.74;
-        nudge *= 0.76;
-      }
-      if (modelWeightVisual === "heavy") {
-        tilt *= 1.12;
-        nudge *= 1.08;
-      } else if (modelWeightVisual === "light") {
-        tilt *= 0.9;
-        nudge *= 0.9;
-      }
-      const sc = selected_controls.length;
-      if (sc > 0) {
-        const damp = Math.max(0.2, 1 - sc * 0.26);
-        tilt *= damp;
-        nudge *= damp;
-      }
-    }
-    return {
-      ["--tower-tilt" as string]: `${tilt}deg`,
-      ["--tower-nudge" as string]: `${nudge}px`,
-    };
-  }, [
-    towerBuilt,
-    gameOver,
-    deploySuccess,
-    structureVisualTier,
-    foundationVisual,
-    modelWeightVisual,
-    selected_controls.length,
-  ]);
+  const continuousBrickCount = useMemo(
+    () =>
+      getStructureBrickCount(
+        structureVisualTier,
+        selected_controls.length,
+        foundationVisual,
+        modelWeightVisual,
+        gameOver,
+        deploySuccess,
+      ),
+    [
+      structureVisualTier,
+      selected_controls.length,
+      foundationVisual,
+      modelWeightVisual,
+      gameOver,
+      deploySuccess,
+    ],
+  );
 
   const successSummary = useMemo(
     () =>
@@ -575,6 +594,13 @@ export default function App() {
     return buildStep === 2;
   }
 
+  function clearDeployWalkTimer() {
+    if (deployWalkTimerRef.current) {
+      window.clearTimeout(deployWalkTimerRef.current);
+      deployWalkTimerRef.current = null;
+    }
+  }
+
   function handleDeploy() {
     const reasons = getGameOverReasons(risks, selection, unsafeNoHumanOversight);
     if (reasons.length > 0) {
@@ -583,9 +609,20 @@ export default function App() {
       );
       return;
     }
-    setDeploySuccess(true);
-    setDeployFailureReasons(null);
+    if (deployWalk !== null) return;
+
+    const walkOutcome = headlineTier === "stable" ? "cross" : "fall";
+    setDeployWalk(walkOutcome);
     setRecoveryGraceRemaining(null);
+    setDeployFailureReasons(null);
+
+    const ms = walkOutcome === "cross" ? 1350 : 1550;
+    clearDeployWalkTimer();
+    deployWalkTimerRef.current = window.setTimeout(() => {
+      deployWalkTimerRef.current = null;
+      setDeployWalk(null);
+      setDeploySuccess(true);
+    }, ms);
   }
 
   function handleGameOverUndo() {
@@ -597,6 +634,8 @@ export default function App() {
   }
 
   function dismissSuccessSummary() {
+    clearDeployWalkTimer();
+    setDeployWalk(null);
     setDeploySuccess(false);
   }
 
@@ -644,6 +683,8 @@ export default function App() {
     setStructureImpactSeq(0);
     setStructureImpactFlash(false);
     setMetricPulse({});
+    clearDeployWalkTimer();
+    setDeployWalk(null);
     clearDragState();
   }
 
@@ -895,6 +936,7 @@ export default function App() {
     (placedData && !placedModel ? " system-chain--foundation-only" : "") +
     (gameOver ? " system-chain--collapsed" : "") +
     (deploySuccess ? " system-chain--settled" : "") +
+    (deployWalk !== null ? " system-chain--deploy-walk" : "") +
     (selected_controls.length > 0 ? " system-chain--has-stabilisers" : "") +
     ` system-chain--stability-${structureVisualTier}` +
     ` system-chain--foundation-${foundationVisual}` +
@@ -1037,46 +1079,63 @@ export default function App() {
                   className={systemChainClass}
                   data-structure-stability={structureVisualTier}
                 >
-                  <div
-                    className="system-chain__tower"
-                    style={towerSwingVars}
-                  >
-                    <div className="system-chain__row">
-                      {placedData && (
-                        <div
-                          className="system-anchor system-anchor--data"
-                          role="group"
-                          aria-label="Data in system"
-                        >
-                          <SystemMiniCard
-                            card={placedData}
-                            draggable={systemMiniDraggable}
-                            onDragStart={handleSystemMiniDragStart(placedData)}
-                            onDragEnd={handleSystemMiniDragEnd}
-                          />
-                        </div>
-                      )}
+                  <div className="system-chain__tower">
+                    <div className="system-chain__connected-strip">
+                      <div className="system-chain__row">
+                        {placedData && (
+                          <div
+                            className="system-anchor system-anchor--data"
+                            role="group"
+                            aria-label="Data in system"
+                          >
+                            <SystemMiniCard
+                              card={placedData}
+                              draggable={systemMiniDraggable}
+                              onDragStart={handleSystemMiniDragStart(placedData)}
+                              onDragEnd={handleSystemMiniDragEnd}
+                            />
+                          </div>
+                        )}
+                        {placedData && placedModel && (
+                          <div
+                            className="system-chain__bridge"
+                            aria-hidden="true"
+                          >
+                            <span className="system-chain__line" />
+                            <Link2
+                              className="system-chain__icon"
+                              strokeWidth={2}
+                              size={18}
+                            />
+                            <span className="system-chain__line" />
+                          </div>
+                        )}
+                        {placedModel && (
+                          <div
+                            className="system-chain__model-wrap"
+                            aria-label="Model in system"
+                          >
+                            <SystemMiniCard
+                              card={placedModel}
+                              draggable={systemMiniDraggable}
+                              onDragStart={handleSystemMiniDragStart(
+                                placedModel,
+                              )}
+                              onDragEnd={handleSystemMiniDragEnd}
+                            />
+                          </div>
+                        )}
+                      </div>
                       {placedData && placedModel && (
-                        <div className="system-chain__bridge" aria-hidden="true">
-                          <span className="system-chain__line" />
-                          <Link2
-                            className="system-chain__icon"
-                            strokeWidth={2}
-                            size={18}
-                          />
-                          <span className="system-chain__line" />
-                        </div>
-                      )}
-                      {placedModel && (
-                        <div
-                          className="system-chain__model-wrap"
-                          aria-label="Model in system"
-                        >
-                          <SystemMiniCard
-                            card={placedModel}
-                            draggable={systemMiniDraggable}
-                            onDragStart={handleSystemMiniDragStart(placedModel)}
-                            onDragEnd={handleSystemMiniDragEnd}
+                        <div className="system-chain__continuous-bridge">
+                          {deployWalk ? (
+                            <span
+                              className={`system-bridge-walker system-bridge-walker--${deployWalk}`}
+                              aria-hidden
+                            />
+                          ) : null}
+                          <SystemContinuousBrickBridge
+                            filled={continuousBrickCount}
                           />
                         </div>
                       )}
@@ -1118,11 +1177,13 @@ export default function App() {
                             : "")
                         }
                         onClick={handleDeploy}
-                        disabled={deployViolationsNow}
+                        disabled={deployViolationsNow || deployWalk !== null}
                         title={
                           deployViolationsNow
                             ? "Stabilise the system before deploy."
-                            : undefined
+                            : deployWalk !== null
+                              ? "Crossing the bridge…"
+                              : undefined
                         }
                       >
                         <Rocket
