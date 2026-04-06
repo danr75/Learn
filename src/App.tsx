@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   Calendar,
   ChevronLeft,
@@ -22,15 +28,12 @@ import {
   buildEndgameSummary,
   computeGameState,
   getComponentProConMessage,
-  getGameOverReasons,
   getMetricPresentation,
   getStructureFoundationVisual,
   getStructureModelWeightVisual,
   getSystemStateTier,
   type StructureFoundationVisual,
   type StructureModelWeightVisual,
-  hasDeployViolations,
-  riskDelta,
   STAT_LABELS,
   type RiskKey,
   type SystemStateTier,
@@ -41,7 +44,7 @@ const CARD_DRAG_MIME = "application/x-legolearn-card";
 
 /** Single line shown in the blue band before the first drop. */
 const SCENARIO_ONLY =
-  "Build a system to classify customer emails using internal data — drag Data into System first, then a model, then controls.";
+  "Build a system to classify customer emails using internal data.";
 
 type Pillar = "DATA" | "MODEL" | "CONTROL";
 
@@ -50,6 +53,8 @@ type GameCardDef = {
   pillar: Pillar;
   title: string;
   description: string;
+  /** Teaching note for the blue instruction band (hint / detail). */
+  learningBlurb: string;
   tags?: { label: string; variant: "q" | "p" | "a" | "f" }[];
 };
 
@@ -65,6 +70,7 @@ function toViewCard(c: CardDefinition): GameCardDef {
     pillar: pillarOf(c.type),
     title: c.title,
     description: c.description,
+    learningBlurb: c.learningBlurb,
     tags: c.tags,
   };
 }
@@ -102,16 +108,67 @@ function findViewCard(id: string): GameCardDef | undefined {
 /** One continuous bridge under data↔model; more slots = wider bar. */
 const BRICK_SLOTS = 10;
 
+function hashSeed(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function makeSeededRng(seed: string) {
+  let state = hashSeed(seed) || 1;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0xffffffff;
+  };
+}
+
+/** Deterministic random: which brick positions are solid (not left-to-right). */
+function pickSolidBrickMask(
+  slots: number,
+  solidCount: number,
+  seed: string,
+): boolean[] {
+  const mask = Array.from({ length: slots }, () => false);
+  if (solidCount >= slots) {
+    mask.fill(true);
+    return mask;
+  }
+  if (solidCount <= 0) return mask;
+  const rnd = makeSeededRng(`${seed}:solid`);
+  const order = Array.from({ length: slots }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  for (let k = 0; k < solidCount; k++) {
+    mask[order[k]] = true;
+  }
+  return mask;
+}
+
+function brickFallVars(slotIndex: number, seed: string): CSSProperties {
+  const rnd = makeSeededRng(`${seed}:fall:${slotIndex}`);
+  const dx = (rnd() - 0.5) * 34;
+  const dy = 22 + rnd() * 16;
+  const rot = (rnd() - 0.5) * 32;
+  return {
+    ["--brick-fall-x" as string]: `${dx}px`,
+    ["--brick-fall-y" as string]: `${dy}px`,
+    ["--brick-fall-rot" as string]: `${rot}deg`,
+  };
+}
+
 function getStructureBrickCount(
   tier: SystemStateTier,
   controlCount: number,
   foundation: StructureFoundationVisual,
   modelWeight: StructureModelWeightVisual,
-  gameOver: boolean,
   deploySuccess: boolean,
 ): number {
   if (deploySuccess) return BRICK_SLOTS;
-  if (gameOver) return 0;
   let n = tier === "stable" ? 10 : tier === "at_risk" ? 6 : 2;
   n = Math.min(BRICK_SLOTS, n + controlCount);
   if (foundation === "strong") n = Math.min(BRICK_SLOTS, n + 1);
@@ -121,14 +178,33 @@ function getStructureBrickCount(
   return Math.max(0, Math.min(BRICK_SLOTS, n));
 }
 
-function SystemContinuousBrickBridge({ filled }: { filled: number }) {
+function SystemContinuousBrickBridge({
+  solidMask,
+  layoutSeed,
+  planksCollapseBurst,
+}: {
+  solidMask: boolean[];
+  layoutSeed: string;
+  planksCollapseBurst?: boolean;
+}) {
   return (
-    <div className="system-chain__continuous-bridge__bricks" aria-hidden>
-      {Array.from({ length: BRICK_SLOTS }, (_, i) => {
-        const empty = i >= filled;
+    <div
+      className={
+        "system-chain__continuous-bridge__bricks system-chain__continuous-bridge__bricks--foot" +
+        (planksCollapseBurst ? " system-bridge-planks--collapse-burst" : "")
+      }
+      aria-hidden
+    >
+      {solidMask.map((solid, i) => {
+        const empty = !solid;
+        const slotStyle: CSSProperties = {
+          zIndex: i + 1,
+          ...(empty ? brickFallVars(i, layoutSeed) : {}),
+        };
         return (
           <div
             key={i}
+            style={slotStyle}
             className={
               "system-brick-slot" +
               (empty ? " system-brick-slot--empty" : "")
@@ -181,6 +257,7 @@ function GameCard({
   card,
   selected,
   onSelect,
+  onCardHint,
   draggable = false,
   onDragStart,
   onDragEnd,
@@ -188,6 +265,7 @@ function GameCard({
   card: GameCardDef;
   selected: boolean;
   onSelect: () => void;
+  onCardHint: () => void;
   draggable?: boolean;
   onDragStart?: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd?: (e: React.DragEvent<HTMLDivElement>) => void;
@@ -207,34 +285,65 @@ function GameCard({
     }
   }
 
+  function handleHintPointerDown(e: React.PointerEvent) {
+    e.stopPropagation();
+  }
+
+  function handleHintClick(e: React.MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    onCardHint();
+  }
+
+  const titleId = `game-card-title-${card.id}`;
+
   return (
     <div
-      role="button"
-      tabIndex={0}
+      className={`game-card ${mod}${selected ? " game-card--selected" : ""}${draggable ? " game-card--draggable" : " game-card--lane-locked"}`}
+      role="group"
+      aria-labelledby={titleId}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      className={`game-card ${mod}${selected ? " game-card--selected" : ""}${draggable ? " game-card--draggable" : " game-card--lane-locked"}`}
-      onClick={onSelect}
-      onKeyDown={handleKeyDown}
-      aria-pressed={selected}
-      aria-label={label}
     >
-      <div className="game-card__row">
-        <span className="game-card__pillar">{card.pillar}</span>
-        <PillarIcon pillar={card.pillar} />
-      </div>
-      <h3 className="game-card__title">{card.title}</h3>
-      <p className="game-card__desc">{card.description}</p>
-      {card.tags && card.tags.length > 0 && (
-        <div className="game-card__tags">
-          {card.tags.map((t) => (
-            <span key={t.label} className={`tag tag--${t.variant}`}>
-              {t.label}
-            </span>
-          ))}
+      <div
+        className="game-card__body"
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected}
+        aria-label={label}
+        onClick={onSelect}
+        onKeyDown={handleKeyDown}
+      >
+        <div className="game-card__meta">
+          <span className="game-card__pillar">{card.pillar}</span>
         </div>
-      )}
+        <h3 id={titleId} className="game-card__title">
+          {card.title}
+        </h3>
+        <p className="game-card__desc">{card.description}</p>
+        {card.tags && card.tags.length > 0 && (
+          <div className="game-card__tags">
+            {card.tags.map((t) => (
+              <span key={t.label} className={`tag tag--${t.variant}`}>
+                {t.label}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <span className="game-card__pillar-icon" aria-hidden>
+        <PillarIcon pillar={card.pillar} />
+      </span>
+      <button
+        type="button"
+        className="game-card__hint"
+        aria-label={`Hint: more detail about ${card.title}`}
+        onClick={handleHintClick}
+        onPointerDown={handleHintPointerDown}
+      >
+        <Lightbulb className="game-card__hint-icon" strokeWidth={1.5} aria-hidden />
+      </button>
     </div>
   );
 }
@@ -267,94 +376,19 @@ function SystemMiniCard({
   );
 }
 
-/** Moves allowed after a threshold breach before the run ends (recovery gameplay). */
-const RECOVERY_GRACE_MOVES = 2;
-
-type MetricPulse = Partial<Record<RiskKey, "up" | "down">>;
-
-function StatMetricCard({
-  riskKey,
-  value,
-  pulse,
-  live,
-}: {
-  riskKey: RiskKey;
-  value: number;
-  pulse: MetricPulse;
-  live: boolean;
-}) {
-  const pulseDir = pulse[riskKey];
-
-  if (!live) {
-    return (
-      <div
-        className="stat-card stat-card--idle"
-        data-metric={riskKey}
-        aria-label={`${STAT_LABELS[riskKey]} — fills in when you add cards to the system`}
-      >
-        <span className="stat-label">{STAT_LABELS[riskKey]}</span>
-        <div className="stat-bar" aria-hidden>
-          <div className="stat-bar__fill stat-bar__fill--idle" style={{ width: "0%" }} />
-        </div>
-        <span className="stat-state stat-state--slot" aria-hidden />
-      </div>
-    );
-  }
-
-  const p = getMetricPresentation(riskKey, value);
-  const mod =
-    p.traffic === "green"
-      ? "stat-card--ok"
-      : p.traffic === "amber"
-        ? "stat-card--warn"
-        : "stat-card--bad";
-  const pulseClass =
-    pulseDir === "up"
-      ? " stat-card--pulse-up"
-      : pulseDir === "down"
-        ? " stat-card--pulse-down"
-        : "";
-
-  return (
-    <div
-      className={`stat-card ${mod}${pulseClass}`}
-      data-metric={riskKey}
-    >
-      <span className="stat-label">{STAT_LABELS[riskKey]}</span>
-      <div className="stat-bar" aria-hidden>
-        <div
-          className="stat-bar__fill"
-          style={{ width: `${Math.round(p.barFill * 100)}%` }}
-        />
-      </div>
-      <span className={`stat-state stat-state--${p.traffic}`}>{p.label}</span>
-    </div>
-  );
-}
-
-type SelectionSnapshot = {
-  selected_data: string[];
-  selected_models: string[];
-  selected_controls: string[];
-  moves: number;
-};
-
 export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [moves, setMoves] = useState(0);
   const [selected_data, setSelected_data] = useState<string[]>([]);
   const [selected_models, setSelected_models] = useState<string[]>([]);
   const [selected_controls, setSelected_controls] = useState<string[]>([]);
   const [dragging, setDragging] = useState<Pillar | null>(null);
   const [dragSource, setDragSource] = useState<"lane" | "system" | null>(null);
   const dragPillarRef = useRef<Pillar | null>(null);
-  const [undoStack, setUndoStack] = useState<SelectionSnapshot[]>([]);
   const selectionRef = useRef({
     selected_data,
     selected_models,
     selected_controls,
   });
-  const movesRef = useRef(moves);
 
   const selection = useMemo(
     () => ({ selected_data, selected_models, selected_controls }),
@@ -366,36 +400,31 @@ export default function App() {
     [selection],
   );
 
-  const [deployFailureReasons, setDeployFailureReasons] = useState<string[] | null>(
-    null,
-  );
   const [deploySuccess, setDeploySuccess] = useState(false);
-  const [recoveryGraceRemaining, setRecoveryGraceRemaining] = useState<
-    number | null
-  >(null);
   const [blueMessage, setBlueMessage] = useState("");
   const [structureImpactSeq, setStructureImpactSeq] = useState(0);
   const [structureImpactFlash, setStructureImpactFlash] = useState(false);
-  const [metricPulse, setMetricPulse] = useState<MetricPulse>({});
-  const pulseClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [deployWalk, setDeployWalk] = useState<"cross" | "fall" | null>(null);
+  const [deployUnstableOutcome, setDeployUnstableOutcome] = useState(false);
+  const [deployPlanksCollapse, setDeployPlanksCollapse] = useState(false);
   const deployWalkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const gameOver = deployFailureReasons !== null;
 
   useEffect(() => {
     selectionRef.current = selection;
-    movesRef.current = moves;
-  }, [selection, moves]);
+  }, [selection]);
 
   useEffect(() => {
     return () => {
-      if (pulseClearRef.current) window.clearTimeout(pulseClearRef.current);
-      if (deployWalkTimerRef.current) {
-        window.clearTimeout(deployWalkTimerRef.current);
-      }
+      clearDeployAnimTimers();
     };
   }, []);
+
+  function clearDeployAnimTimers() {
+    if (deployWalkTimerRef.current) {
+      window.clearTimeout(deployWalkTimerRef.current);
+      deployWalkTimerRef.current = null;
+    }
+  }
 
   useEffect(() => {
     if (structureImpactSeq === 0) return;
@@ -431,17 +460,14 @@ export default function App() {
 
   const headlineTier = !hasSystemContent ? ("stable" as const) : systemTier;
 
-  const deployViolationsNow = useMemo(
-    () => hasDeployViolations(risks, selection, unsafeNoHumanOversight),
-    [risks, selection, unsafeNoHumanOversight],
-  );
-
   const towerBuilt = Boolean(placedData && placedModel);
 
   const structureVisualTier = useMemo((): SystemStateTier => {
-    if (gameOver || deploySuccess || !towerBuilt) return "stable";
+    if (!towerBuilt) return "stable";
+    if (deploySuccess && !deployUnstableOutcome) return "stable";
+    if (deploySuccess && deployUnstableOutcome) return headlineTier;
     return headlineTier;
-  }, [gameOver, deploySuccess, towerBuilt, headlineTier]);
+  }, [deploySuccess, deployUnstableOutcome, towerBuilt, headlineTier]);
 
   const foundationVisual = useMemo(
     () => getStructureFoundationVisual(systemDataId ?? undefined),
@@ -460,7 +486,6 @@ export default function App() {
         selected_controls.length,
         foundationVisual,
         modelWeightVisual,
-        gameOver,
         deploySuccess,
       ),
     [
@@ -468,14 +493,53 @@ export default function App() {
       selected_controls.length,
       foundationVisual,
       modelWeightVisual,
-      gameOver,
       deploySuccess,
     ],
   );
 
+  const brickLayoutSeed = useMemo(
+    () =>
+      JSON.stringify({
+        selected_data,
+        selected_models,
+        selected_controls,
+        structureVisualTier,
+        deploySuccess,
+      }),
+    [
+      selected_data,
+      selected_models,
+      selected_controls,
+      structureVisualTier,
+      deploySuccess,
+    ],
+  );
+
+  const solidBrickMask = useMemo(
+    () =>
+      pickSolidBrickMask(
+        BRICK_SLOTS,
+        continuousBrickCount,
+        brickLayoutSeed + `|n=${continuousBrickCount}`,
+      ),
+    [brickLayoutSeed, continuousBrickCount],
+  );
+
+  const displayBrickMask = useMemo(() => {
+    if (deployPlanksCollapse || (deploySuccess && deployUnstableOutcome)) {
+      return Array.from({ length: BRICK_SLOTS }, () => false);
+    }
+    return solidBrickMask;
+  }, [
+    deployPlanksCollapse,
+    deploySuccess,
+    deployUnstableOutcome,
+    solidBrickMask,
+  ]);
+
   const successSummary = useMemo(
     () =>
-      deploySuccess
+      deploySuccess && !deployUnstableOutcome
         ? buildEndgameSummary(
             true,
             risks,
@@ -484,88 +548,11 @@ export default function App() {
             [],
           )
         : null,
-    [deploySuccess, risks, selection, unsafeNoHumanOversight],
+    [deploySuccess, deployUnstableOutcome, risks, selection, unsafeNoHumanOversight],
   );
 
-  const failureSummary = useMemo(() => {
-    if (!gameOver || !deployFailureReasons) return null;
-    return buildEndgameSummary(
-      false,
-      risks,
-      selection,
-      unsafeNoHumanOversight,
-      deployFailureReasons,
-    );
-  }, [
-    gameOver,
-    deployFailureReasons,
-    risks,
-    selection,
-    unsafeNoHumanOversight,
-  ]);
-
-  const recoveryGraceRef = useRef<number | null>(null);
-  useEffect(() => {
-    recoveryGraceRef.current = recoveryGraceRemaining;
-  }, [recoveryGraceRemaining]);
-
-  function triggerMetricPulse(delta: Partial<Record<RiskKey, number>>) {
-    const nextPulse: MetricPulse = {};
-    for (const k of RISK_ORDER) {
-      const d = delta[k];
-      if (d == null || d === 0) continue;
-      nextPulse[k] = d > 0 ? "up" : "down";
-    }
-    setMetricPulse(nextPulse);
-    if (pulseClearRef.current) window.clearTimeout(pulseClearRef.current);
-    pulseClearRef.current = window.setTimeout(() => setMetricPulse({}), 900);
-  }
-
-  /** @returns true if this transition triggered game over (recovery exhausted). */
-  function applyRiskTransition(
-    prevSel: GameSelection,
-    nextSel: GameSelection,
-  ): boolean {
-    const prevResult = computeGameState(prevSel);
-    const nextResult = computeGameState(nextSel);
-    const delta = riskDelta(prevResult.risks, nextResult.risks);
+  function applyRiskTransition(_prevSel: GameSelection, _nextSel: GameSelection) {
     setStructureImpactSeq((n) => n + 1);
-    triggerMetricPulse(delta);
-
-    const violated = hasDeployViolations(
-      nextResult.risks,
-      nextSel,
-      nextResult.unsafeNoHumanOversight,
-    );
-    const wasViolated = hasDeployViolations(
-      prevResult.risks,
-      prevSel,
-      prevResult.unsafeNoHumanOversight,
-    );
-
-    if (!violated) {
-      setRecoveryGraceRemaining(null);
-      return false;
-    }
-    if (!wasViolated) {
-      setRecoveryGraceRemaining(RECOVERY_GRACE_MOVES);
-      return false;
-    }
-    const cur = recoveryGraceRef.current ?? RECOVERY_GRACE_MOVES;
-    const nextG = cur - 1;
-    if (nextG < 0) {
-      setDeployFailureReasons(
-        getGameOverReasons(
-          nextResult.risks,
-          nextSel,
-          nextResult.unsafeNoHumanOversight,
-        ),
-      );
-      setRecoveryGraceRemaining(0);
-      return true;
-    }
-    setRecoveryGraceRemaining(nextG);
-    return false;
   }
 
   function runPostPlacement(
@@ -580,7 +567,7 @@ export default function App() {
   }
 
   function pillarAllowedInSystem(p: Pillar): boolean {
-    if (gameOver || deploySuccess) return false;
+    if (deploySuccess) return false;
     if (p === "DATA") return buildStep === 0;
     if (p === "MODEL") return buildStep === 1;
     if (p === "CONTROL") return buildStep === 2;
@@ -588,85 +575,46 @@ export default function App() {
   }
 
   function canDragCardToSystem(card: GameCardDef): boolean {
-    if (gameOver || deploySuccess) return false;
+    if (deploySuccess) return false;
     if (card.pillar === "DATA") return buildStep === 0;
     if (card.pillar === "MODEL") return buildStep === 1;
     return buildStep === 2;
   }
 
-  function clearDeployWalkTimer() {
-    if (deployWalkTimerRef.current) {
-      window.clearTimeout(deployWalkTimerRef.current);
-      deployWalkTimerRef.current = null;
-    }
-  }
-
   function handleDeploy() {
-    const reasons = getGameOverReasons(risks, selection, unsafeNoHumanOversight);
-    if (reasons.length > 0) {
-      setBlueMessage(
-        "Deploy is locked until every meter is in a safe band — adjust the stack, then try again.",
-      );
-      return;
-    }
     if (deployWalk !== null) return;
 
-    const walkOutcome = headlineTier === "stable" ? "cross" : "fall";
-    setDeployWalk(walkOutcome);
-    setRecoveryGraceRemaining(null);
-    setDeployFailureReasons(null);
+    const stableDeploy = headlineTier === "stable";
+    setDeployWalk(stableDeploy ? "cross" : "fall");
+    setDeployUnstableOutcome(false);
+    setDeployPlanksCollapse(false);
 
-    const ms = walkOutcome === "cross" ? 1350 : 1550;
-    clearDeployWalkTimer();
+    const walkMs = stableDeploy ? 1350 : 1550;
+    const plankFallMs = 700;
+
+    clearDeployAnimTimers();
     deployWalkTimerRef.current = window.setTimeout(() => {
-      deployWalkTimerRef.current = null;
       setDeployWalk(null);
-      setDeploySuccess(true);
-    }, ms);
-  }
-
-  function handleGameOverUndo() {
-    setDeployFailureReasons(null);
-    setRecoveryGraceRemaining(null);
-    if (undoStack.length > 0) {
-      undoLastMove();
-    }
+      if (!stableDeploy) {
+        setDeployPlanksCollapse(true);
+        deployWalkTimerRef.current = window.setTimeout(() => {
+          deployWalkTimerRef.current = null;
+          setDeployUnstableOutcome(true);
+          setDeploySuccess(true);
+        }, plankFallMs);
+      } else {
+        deployWalkTimerRef.current = null;
+        setDeploySuccess(true);
+      }
+    }, walkMs);
   }
 
   function dismissSuccessSummary() {
-    clearDeployWalkTimer();
+    clearDeployAnimTimers();
     setDeployWalk(null);
+    setDeployUnstableOutcome(false);
+    setDeployPlanksCollapse(false);
     setDeploySuccess(false);
-  }
-
-  function saveSnapshotBeforeMove() {
-    const s = selectionRef.current;
-    const m = movesRef.current;
-    setUndoStack((stack) => [
-      ...stack,
-      {
-        selected_data: [...s.selected_data],
-        selected_models: [...s.selected_models],
-        selected_controls: [...s.selected_controls],
-        moves: m,
-      },
-    ]);
-  }
-
-  function undoLastMove() {
-    setRecoveryGraceRemaining(null);
-    setBlueMessage(
-      "Undid the last drop — meters match the earlier stack; drop a card to refresh this line.",
-    );
-    setUndoStack((stack) => {
-      if (stack.length === 0) return stack;
-      const snap = stack[stack.length - 1];
-      setSelected_data(snap.selected_data);
-      setSelected_models(snap.selected_models);
-      setSelected_controls(snap.selected_controls);
-      setMoves(snap.moves);
-      return stack.slice(0, -1);
-    });
   }
 
   function fullReset() {
@@ -674,17 +622,14 @@ export default function App() {
     setSelected_data([]);
     setSelected_models([]);
     setSelected_controls([]);
-    setMoves(0);
-    setUndoStack([]);
-    setDeployFailureReasons(null);
     setDeploySuccess(false);
-    setRecoveryGraceRemaining(null);
     setBlueMessage("");
     setStructureImpactSeq(0);
     setStructureImpactFlash(false);
-    setMetricPulse({});
-    clearDeployWalkTimer();
+    clearDeployAnimTimers();
     setDeployWalk(null);
+    setDeployUnstableOutcome(false);
+    setDeployPlanksCollapse(false);
     clearDragState();
   }
 
@@ -700,7 +645,7 @@ export default function App() {
 
   function handleLaneDragStart(card: GameCardDef) {
     return (e: React.DragEvent<HTMLDivElement>) => {
-      if (gameOver || deploySuccess || !canDragCardToSystem(card)) {
+      if (deploySuccess || !canDragCardToSystem(card)) {
         e.preventDefault();
         return;
       }
@@ -720,7 +665,7 @@ export default function App() {
 
   function handleSystemMiniDragStart(card: GameCardDef) {
     return (e: React.DragEvent<HTMLDivElement>) => {
-      if (gameOver || deploySuccess) {
+      if (deploySuccess) {
         e.preventDefault();
         return;
       }
@@ -743,7 +688,7 @@ export default function App() {
   }
 
   function handleSystemZoneDragOver(e: React.DragEvent) {
-    if (gameOver || deploySuccess) return;
+    if (deploySuccess) return;
     if (dragSource === "system") return;
     const p = dragPillarRef.current;
     if (!p || !pillarAllowedInSystem(p)) return;
@@ -760,13 +705,11 @@ export default function App() {
       selected_models: [],
       selected_controls: [],
     };
-    saveSnapshotBeforeMove();
     runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
     setSelected_data(nextSel.selected_data);
     setSelected_models(nextSel.selected_models);
     setSelected_controls(nextSel.selected_controls);
     setDeploySuccess(false);
-    setMoves((m) => m + 1);
     clearDragState();
   }
 
@@ -779,11 +722,9 @@ export default function App() {
       selected_models: [payload.id],
       selected_controls: [...prevSel.selected_controls],
     };
-    saveSnapshotBeforeMove();
     runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
     setSelected_models([payload.id]);
     setDeploySuccess(false);
-    setMoves((m) => m + 1);
     clearDragState();
   }
 
@@ -799,17 +740,15 @@ export default function App() {
       ...prevSel,
       selected_controls: [...prevSel.selected_controls, payload.id],
     };
-    saveSnapshotBeforeMove();
     runPostPlacement(prevSel, nextSel, def.id, def.title, def.type);
     setSelected_controls(nextSel.selected_controls);
     setDeploySuccess(false);
-    setMoves((m) => m + 1);
     clearDragState();
   }
 
   function handleSystemZoneDrop(e: React.DragEvent) {
     e.preventDefault();
-    if (gameOver || deploySuccess) return;
+    if (deploySuccess) return;
     const payload = parseCardDragPayload(e);
     if (!payload || payload.fromSystem) return;
     if (!pillarAllowedInSystem(payload.pillar)) return;
@@ -834,31 +773,15 @@ export default function App() {
     dragSource === "lane" &&
     pillarAllowedInSystem(dragging);
 
-  const systemMiniDraggable = !gameOver && !deploySuccess;
+  const systemMiniDraggable = !deploySuccess;
 
   function removePlacedFromSystem(
     prevSel: GameSelection,
     nextSel: GameSelection,
   ) {
-    saveSnapshotBeforeMove();
-    const triggeredGameOver = applyRiskTransition(prevSel, nextSel);
-    if (!triggeredGameOver) {
-      const nextResult = computeGameState(nextSel);
-      const stillViolated = hasDeployViolations(
-        nextResult.risks,
-        nextSel,
-        nextResult.unsafeNoHumanOversight,
-      );
-      if (stillViolated) {
-        setRecoveryGraceRemaining((g) => {
-          if (g === null) return null;
-          return Math.min(RECOVERY_GRACE_MOVES, g + 1);
-        });
-      }
-    }
+    applyRiskTransition(prevSel, nextSel);
     setBlueMessage("");
     setDeploySuccess(false);
-    setMoves((m) => m + 1);
     clearDragState();
   }
 
@@ -905,7 +828,7 @@ export default function App() {
 
   function handleColumnDragOver(pillar: Pillar) {
     return (e: React.DragEvent) => {
-      if (gameOver || deploySuccess) return;
+      if (deploySuccess) return;
       if (dragSource !== "system" || dragging !== pillar) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
@@ -915,7 +838,7 @@ export default function App() {
   function handleColumnDrop(pillar: Pillar) {
     return (e: React.DragEvent) => {
       e.preventDefault();
-      if (gameOver || deploySuccess) return;
+      if (deploySuccess) return;
       const payload = parseCardDragPayload(e);
       if (!payload || !payload.fromSystem || payload.pillar !== pillar) return;
       if (pillar === "DATA") {
@@ -934,8 +857,7 @@ export default function App() {
     "system-chain" +
     (placedData && placedModel ? " system-chain--connected" : "") +
     (placedData && !placedModel ? " system-chain--foundation-only" : "") +
-    (gameOver ? " system-chain--collapsed" : "") +
-    (deploySuccess ? " system-chain--settled" : "") +
+    (deploySuccess && !deployUnstableOutcome ? " system-chain--settled" : "") +
     (deployWalk !== null ? " system-chain--deploy-walk" : "") +
     (selected_controls.length > 0 ? " system-chain--has-stabilisers" : "") +
     ` system-chain--stability-${structureVisualTier}` +
@@ -946,16 +868,10 @@ export default function App() {
     "system-zone" +
     (draggingAllowed ? " system-zone--drop-ready" : "") +
     (hasSystemContent ? " system-zone--has-stack" : "") +
-    (headlineTier === "unstable" &&
-    hasSystemContent &&
-    !gameOver &&
-    !deploySuccess
+    (headlineTier === "unstable" && hasSystemContent && !deploySuccess
       ? " system-zone--unstable"
       : "") +
-    (structureVisualTier === "at_risk" &&
-    towerBuilt &&
-    !gameOver &&
-    !deploySuccess
+    (structureVisualTier === "at_risk" && towerBuilt && !deploySuccess
       ? " system-zone--structure-at-risk"
       : "") +
     (structureImpactFlash ? " system-zone--structure-impact" : "") +
@@ -966,21 +882,18 @@ export default function App() {
       ? "System: drop a Data card here next."
       : buildStep === 1
         ? "System: drop a Model card here next."
-        : "System: drop Control cards here, then Deploy when ready.";
+        : "System: add Control cards if you want, or Deploy when ready.";
 
   const activeLaneSet = useMemo(() => {
-    if (gameOver || deploySuccess) return new Set<Pillar>();
+    if (deploySuccess) return new Set<Pillar>();
     if (buildStep === 0) return new Set<Pillar>(["DATA"]);
     if (buildStep === 1) return new Set<Pillar>(["MODEL"]);
     return new Set<Pillar>(["CONTROL"]);
-  }, [buildStep, deploySuccess, gameOver]);
+  }, [buildStep, deploySuccess]);
 
   function columnClass(pillar: Pillar) {
     const returnDrop =
-      dragSource === "system" &&
-      dragging === pillar &&
-      !gameOver &&
-      !deploySuccess;
+      dragSource === "system" && dragging === pillar && !deploySuccess;
     return (
       "column" +
       (activeLaneSet.has(pillar) ? " column--needs-action" : "") +
@@ -1009,49 +922,27 @@ export default function App() {
         />
       </header>
 
-      <div
-        className={`subheader subheader--narrative${
-          gameOver ? " subheader--alert" : ""
-        }${
-          headlineTier === "unstable" &&
-          hasSystemContent &&
-          !gameOver &&
-          !deploySuccess
-            ? " subheader--unstable"
-            : ""
-        }`}
-        role="region"
-        aria-label="Scenario or component trade-off"
-      >
-        <p
-          className="subheader-single"
-          aria-live={gameOver ? "assertive" : "polite"}
+      {!(deploySuccess && deployUnstableOutcome) && (
+        <div
+          className={`subheader subheader--narrative${
+            headlineTier === "unstable" && hasSystemContent && !deploySuccess
+              ? " subheader--unstable"
+              : ""
+          }`}
+          role="region"
+          aria-label="Scenario or component trade-off"
         >
-          {gameOver
-            ? "Run ended — limits held; undo or restart from the dialog (details in the overlay)."
-            : deploySuccess
+          <p className="subheader-single" aria-live="polite">
+            {deploySuccess
               ? "Deploy cleared — open the summary overlay for domain feedback and insights."
-              : !hasSystemContent
-                ? SCENARIO_ONLY
-                : blueMessage ||
-                  "Drop a card into System to see that component's trade-offs here."}
-        </p>
-      </div>
-
-      <section
-        className="stats-row"
-        aria-label="System pressure by dimension"
-      >
-        {RISK_ORDER.map((key) => (
-          <StatMetricCard
-            key={key}
-            riskKey={key}
-            value={risks[key]}
-            pulse={metricPulse}
-            live={hasSystemContent}
-          />
-        ))}
-      </section>
+              : blueMessage !== ""
+                ? blueMessage
+                : !hasSystemContent
+                  ? SCENARIO_ONLY
+                  : "Drop a card into System to see that component's trade-offs here."}
+          </p>
+        </div>
+      )}
 
       <main className="app-main">
         <section
@@ -1068,11 +959,14 @@ export default function App() {
           >
             <div className="system-zone__content">
               {!hasSystemContent && (
-                <Rocket
-                  className="system-zone__placeholder-icon"
-                  strokeWidth={1}
-                  aria-hidden
-                />
+                <div className="system-zone__placeholder">
+                  <Rocket
+                    className="system-zone__placeholder-icon"
+                    strokeWidth={1}
+                    aria-hidden
+                  />
+                  <p className="system-zone__placeholder-label">Drop Here</p>
+                </div>
               )}
               {hasSystemContent && (
                 <div
@@ -1135,17 +1029,13 @@ export default function App() {
                             />
                           ) : null}
                           <SystemContinuousBrickBridge
-                            filled={continuousBrickCount}
+                            solidMask={displayBrickMask}
+                            layoutSeed={brickLayoutSeed}
+                            planksCollapseBurst={deployPlanksCollapse}
                           />
                         </div>
                       )}
                     </div>
-                    {placedData && placedModel && (
-                      <p className="system-chain__status">
-                        <span className="system-chain__status-dot" />
-                        Connected
-                      </p>
-                    )}
                   </div>
                   {selected_controls.length > 0 && (
                     <div
@@ -1170,20 +1060,11 @@ export default function App() {
                     <div className="system-zone__deploy">
                       <button
                         type="button"
-                        className={
-                          "system-deploy-btn" +
-                          (deployViolationsNow
-                            ? " system-deploy-btn--blocked"
-                            : "")
-                        }
+                        className="system-deploy-btn"
                         onClick={handleDeploy}
-                        disabled={deployViolationsNow || deployWalk !== null}
+                        disabled={deployWalk !== null}
                         title={
-                          deployViolationsNow
-                            ? "Stabilise the system before deploy."
-                            : deployWalk !== null
-                              ? "Crossing the bridge…"
-                              : undefined
+                          deployWalk !== null ? "Crossing the bridge…" : undefined
                         }
                       >
                         <Rocket
@@ -1196,8 +1077,17 @@ export default function App() {
                     </div>
                   )}
                   {deploySuccess && (
-                    <p className="system-zone__deployed-msg">
-                      Deployed successfully
+                    <p
+                      className={
+                        "system-zone__deployed-msg" +
+                        (deployUnstableOutcome
+                          ? " system-zone__deployed-msg--unstable"
+                          : "")
+                      }
+                    >
+                      {deployUnstableOutcome
+                        ? "System unstable"
+                        : "Deployed successfully"}
                     </p>
                   )}
                 </div>
@@ -1226,6 +1116,9 @@ export default function App() {
                     card={c}
                     selected={selectedId === c.id}
                     onSelect={() => handleSelect(c.id)}
+                    onCardHint={() =>
+                      setBlueMessage(`${c.title} — ${c.learningBlurb}`)
+                    }
                     draggable={canDragCardToSystem(c)}
                     onDragStart={handleLaneDragStart(c)}
                     onDragEnd={handleLaneDragEnd}
@@ -1247,6 +1140,9 @@ export default function App() {
                     card={c}
                     selected={selectedId === c.id}
                     onSelect={() => handleSelect(c.id)}
+                    onCardHint={() =>
+                      setBlueMessage(`${c.title} — ${c.learningBlurb}`)
+                    }
                     draggable={canDragCardToSystem(c)}
                     onDragStart={handleLaneDragStart(c)}
                     onDragEnd={handleLaneDragEnd}
@@ -1268,6 +1164,9 @@ export default function App() {
                     card={c}
                     selected={selectedId === c.id}
                     onSelect={() => handleSelect(c.id)}
+                    onCardHint={() =>
+                      setBlueMessage(`${c.title} — ${c.learningBlurb}`)
+                    }
                     draggable={canDragCardToSystem(c)}
                     onDragStart={handleLaneDragStart(c)}
                     onDragEnd={handleLaneDragEnd}
@@ -1278,65 +1177,75 @@ export default function App() {
           </div>
         </div>
 
-        {gameOver && deployFailureReasons && (
+        {deploySuccess && deployUnstableOutcome && (
           <div
-            className="game-over-overlay"
-            role="alertdialog"
+            className="success-overlay success-overlay--unstable-deploy"
+            role="dialog"
             aria-modal="true"
-            aria-labelledby="game-over-title"
+            aria-labelledby="unstable-deploy-title"
           >
-            <div className="game-over-panel">
-              <h2 id="game-over-title">Run ended — limits held</h2>
-              <p className="game-over-lead">
-                The recovery window closed before the stack came back in range.
+            <div className="success-panel success-panel--unstable-deploy">
+              <h2 id="unstable-deploy-title" className="success-panel__title-unstable">
+                System unstable
+              </h2>
+              <p className="success-lead success-lead--unstable">
+                Deploy went through a risky band — every plank dropped. Readout
+                matches the row above, condensed.
               </p>
-              {failureSummary && (
-                <>
-                  <p className="game-over-section-label">Readout</p>
-                  <ul className="game-over-domains">
-                    {failureSummary.domains.map((d) => (
-                      <li key={d.id}>{d.blurb}</li>
-                    ))}
-                  </ul>
-                  <p className="game-over-section-label">Insights</p>
-                  <ul className="game-over-insights">
-                    {failureSummary.insights.map((line, i) => (
-                      <li key={`in-${i}`}>{line}</li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              <p className="game-over-section-label game-over-section-label--muted">
-                Technical detail
-              </p>
-              <ul className="game-over-technical">
-                {deployFailureReasons.map((r, i) => (
-                  <li key={`${i}-${r}`}>{r}</li>
-                ))}
-              </ul>
-              <div className="game-over-actions">
+              <div
+                className="deploy-unstable-metrics"
+                aria-label="System pressure by dimension"
+              >
+                {RISK_ORDER.map((key) => {
+                  const p = getMetricPresentation(key, risks[key]);
+                  const trafficMod =
+                    p.traffic === "green"
+                      ? "ok"
+                      : p.traffic === "amber"
+                        ? "warn"
+                        : "bad";
+                  return (
+                    <div
+                      key={key}
+                      className={`deploy-mini-metric deploy-mini-metric--${trafficMod}`}
+                    >
+                      <span className="deploy-mini-metric__label">
+                        {STAT_LABELS[key]}
+                      </span>
+                      <div className="deploy-mini-metric__bar" aria-hidden>
+                        <div
+                          className="deploy-mini-metric__fill"
+                          style={{
+                            width: `${Math.round(p.barFill * 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="deploy-mini-metric__state">{p.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="success-actions">
                 <button
                   type="button"
-                  className="game-over-btn-primary"
-                  onClick={handleGameOverUndo}
+                  className="success-btn-primary"
+                  onClick={fullReset}
                 >
-                  {undoStack.length > 0
-                    ? "Undo last move"
-                    : "Back to build"}
+                  New run
                 </button>
                 <button
                   type="button"
-                  className="game-over-btn-secondary"
-                  onClick={fullReset}
+                  className="success-btn-secondary"
+                  onClick={dismissSuccessSummary}
                 >
-                  Start again
+                  Close summary
                 </button>
               </div>
             </div>
           </div>
         )}
 
-        {deploySuccess && successSummary && (
+        {deploySuccess && !deployUnstableOutcome && successSummary && (
           <div
             className="success-overlay"
             role="dialog"
