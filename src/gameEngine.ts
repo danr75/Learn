@@ -471,6 +471,29 @@ export function getComponentProConMessage(
   );
 }
 
+/** Visual-only: how solid the data layer feels under the model. */
+export type StructureFoundationVisual = "strong" | "medium" | "weak";
+
+/** Visual-only: how heavy the model feels on the stack. */
+export type StructureModelWeightVisual = "heavy" | "light" | "none";
+
+export function getStructureFoundationVisual(
+  dataId: string | null | undefined,
+): StructureFoundationVisual {
+  if (!dataId) return "medium";
+  if (dataId === "historical_data") return "strong";
+  if (dataId === "synthetic_data") return "weak";
+  return "medium";
+}
+
+export function getStructureModelWeightVisual(
+  modelId: string | null | undefined,
+): StructureModelWeightVisual {
+  if (!modelId) return "none";
+  if (modelId === "llm_classifier") return "heavy";
+  return "light";
+}
+
 export type EndgameDomain = "quality" | "risk" | "design";
 
 export type EndgameSummary = {

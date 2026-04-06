@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   Calendar,
   ChevronLeft,
@@ -24,11 +30,14 @@ import {
   getComponentProConMessage,
   getGameOverReasons,
   getMetricPresentation,
+  getStructureFoundationVisual,
+  getStructureModelWeightVisual,
   getSystemStateTier,
   hasDeployViolations,
   riskDelta,
   STAT_LABELS,
   type RiskKey,
+  type SystemStateTier,
 } from "./gameEngine";
 import "./App.css";
 
@@ -97,16 +106,25 @@ function findViewCard(id: string): GameCardDef | undefined {
 function parseCardDragPayload(e: React.DragEvent): {
   id: string;
   pillar: Pillar;
+  fromSystem?: boolean;
 } | null {
   try {
     const raw = e.dataTransfer.getData(CARD_DRAG_MIME);
     if (!raw) return null;
-    const o = JSON.parse(raw) as { id?: string; pillar?: Pillar };
+    const o = JSON.parse(raw) as {
+      id?: string;
+      pillar?: Pillar;
+      fromSystem?: boolean;
+    };
     if (!o.id || !o.pillar) return null;
     if (o.pillar !== "DATA" && o.pillar !== "MODEL" && o.pillar !== "CONTROL") {
       return null;
     }
-    return { id: o.id, pillar: o.pillar };
+    return {
+      id: o.id,
+      pillar: o.pillar,
+      fromSystem: o.fromSystem === true,
+    };
   } catch {
     return null;
   }
@@ -181,9 +199,25 @@ function GameCard({
   );
 }
 
-function SystemMiniCard({ card }: { card: GameCardDef }) {
+function SystemMiniCard({
+  card,
+  draggable = false,
+  onDragStart,
+  onDragEnd,
+}: {
+  card: GameCardDef;
+  draggable?: boolean;
+  onDragStart?: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: (e: React.DragEvent<HTMLDivElement>) => void;
+}) {
+  const mod = draggable ? " system-mini-card--draggable" : "";
   return (
-    <div className="system-mini-card">
+    <div
+      className={`system-mini-card${mod}`}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+    >
       <div className="system-mini-card__row">
         <span className="system-mini-card__pillar">{card.pillar}</span>
         <PillarIcon pillar={card.pillar} />
@@ -272,6 +306,7 @@ export default function App() {
   const [selected_models, setSelected_models] = useState<string[]>([]);
   const [selected_controls, setSelected_controls] = useState<string[]>([]);
   const [dragging, setDragging] = useState<Pillar | null>(null);
+  const [dragSource, setDragSource] = useState<"lane" | "system" | null>(null);
   const dragPillarRef = useRef<Pillar | null>(null);
   const [undoStack, setUndoStack] = useState<SelectionSnapshot[]>([]);
   const selectionRef = useRef({
@@ -299,6 +334,8 @@ export default function App() {
     number | null
   >(null);
   const [blueMessage, setBlueMessage] = useState("");
+  const [structureImpactSeq, setStructureImpactSeq] = useState(0);
+  const [structureImpactFlash, setStructureImpactFlash] = useState(false);
   const [metricPulse, setMetricPulse] = useState<MetricPulse>({});
   const pulseClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -314,6 +351,13 @@ export default function App() {
       if (pulseClearRef.current) window.clearTimeout(pulseClearRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (structureImpactSeq === 0) return;
+    setStructureImpactFlash(true);
+    const t = window.setTimeout(() => setStructureImpactFlash(false), 380);
+    return () => window.clearTimeout(t);
+  }, [structureImpactSeq]);
 
   const systemDataId = selected_data[0] ?? null;
   const systemModelId = selected_models[0] ?? null;
@@ -346,6 +390,69 @@ export default function App() {
     () => hasDeployViolations(risks, selection, unsafeNoHumanOversight),
     [risks, selection, unsafeNoHumanOversight],
   );
+
+  const towerBuilt = Boolean(placedData && placedModel);
+
+  const structureVisualTier = useMemo((): SystemStateTier => {
+    if (gameOver || deploySuccess || !towerBuilt) return "stable";
+    return headlineTier;
+  }, [gameOver, deploySuccess, towerBuilt, headlineTier]);
+
+  const foundationVisual = useMemo(
+    () => getStructureFoundationVisual(systemDataId ?? undefined),
+    [systemDataId],
+  );
+
+  const modelWeightVisual = useMemo(
+    () => getStructureModelWeightVisual(systemModelId ?? undefined),
+    [systemModelId],
+  );
+
+  const towerSwingVars = useMemo((): CSSProperties => {
+    let tilt = 0;
+    let nudge = 0;
+    if (towerBuilt && !gameOver && !deploySuccess) {
+      if (structureVisualTier === "at_risk") {
+        tilt = 2.35;
+        nudge = 5;
+      } else if (structureVisualTier === "unstable") {
+        tilt = 5.1;
+        nudge = 10.5;
+      }
+      if (foundationVisual === "weak") {
+        tilt *= 1.18;
+        nudge *= 1.12;
+      } else if (foundationVisual === "strong") {
+        tilt *= 0.74;
+        nudge *= 0.76;
+      }
+      if (modelWeightVisual === "heavy") {
+        tilt *= 1.12;
+        nudge *= 1.08;
+      } else if (modelWeightVisual === "light") {
+        tilt *= 0.9;
+        nudge *= 0.9;
+      }
+      const sc = selected_controls.length;
+      if (sc > 0) {
+        const damp = Math.max(0.2, 1 - sc * 0.26);
+        tilt *= damp;
+        nudge *= damp;
+      }
+    }
+    return {
+      ["--tower-tilt" as string]: `${tilt}deg`,
+      ["--tower-nudge" as string]: `${nudge}px`,
+    };
+  }, [
+    towerBuilt,
+    gameOver,
+    deploySuccess,
+    structureVisualTier,
+    foundationVisual,
+    modelWeightVisual,
+    selected_controls.length,
+  ]);
 
   const successSummary = useMemo(
     () =>
@@ -395,17 +502,15 @@ export default function App() {
     pulseClearRef.current = window.setTimeout(() => setMetricPulse({}), 900);
   }
 
-  function runPostPlacement(
+  /** @returns true if this transition triggered game over (recovery exhausted). */
+  function applyRiskTransition(
     prevSel: GameSelection,
     nextSel: GameSelection,
-    cardId: string,
-    cardTitle: string,
-    cardType: CardType,
-  ) {
+  ): boolean {
     const prevResult = computeGameState(prevSel);
     const nextResult = computeGameState(nextSel);
     const delta = riskDelta(prevResult.risks, nextResult.risks);
-    setBlueMessage(getComponentProConMessage(cardId, cardTitle, cardType));
+    setStructureImpactSeq((n) => n + 1);
     triggerMetricPulse(delta);
 
     const violated = hasDeployViolations(
@@ -421,11 +526,11 @@ export default function App() {
 
     if (!violated) {
       setRecoveryGraceRemaining(null);
-      return;
+      return false;
     }
     if (!wasViolated) {
       setRecoveryGraceRemaining(RECOVERY_GRACE_MOVES);
-      return;
+      return false;
     }
     const cur = recoveryGraceRef.current ?? RECOVERY_GRACE_MOVES;
     const nextG = cur - 1;
@@ -438,9 +543,21 @@ export default function App() {
         ),
       );
       setRecoveryGraceRemaining(0);
-    } else {
-      setRecoveryGraceRemaining(nextG);
+      return true;
     }
+    setRecoveryGraceRemaining(nextG);
+    return false;
+  }
+
+  function runPostPlacement(
+    prevSel: GameSelection,
+    nextSel: GameSelection,
+    cardId: string,
+    cardTitle: string,
+    cardType: CardType,
+  ) {
+    applyRiskTransition(prevSel, nextSel);
+    setBlueMessage(getComponentProConMessage(cardId, cardTitle, cardType));
   }
 
   function pillarAllowedInSystem(p: Pillar): boolean {
@@ -524,11 +641,20 @@ export default function App() {
     setDeploySuccess(false);
     setRecoveryGraceRemaining(null);
     setBlueMessage("");
+    setStructureImpactSeq(0);
+    setStructureImpactFlash(false);
     setMetricPulse({});
+    clearDragState();
   }
 
   function handleSelect(id: string) {
     setSelectedId((prev) => (prev === id ? null : id));
+  }
+
+  function clearDragState() {
+    dragPillarRef.current = null;
+    setDragging(null);
+    setDragSource(null);
   }
 
   function handleLaneDragStart(card: GameCardDef) {
@@ -542,17 +668,42 @@ export default function App() {
       e.dataTransfer.setData("text/plain", card.id);
       e.dataTransfer.effectAllowed = "move";
       dragPillarRef.current = card.pillar;
+      setDragSource("lane");
       setDragging(card.pillar);
     };
   }
 
   function handleLaneDragEnd() {
-    dragPillarRef.current = null;
-    setDragging(null);
+    clearDragState();
+  }
+
+  function handleSystemMiniDragStart(card: GameCardDef) {
+    return (e: React.DragEvent<HTMLDivElement>) => {
+      if (gameOver || deploySuccess) {
+        e.preventDefault();
+        return;
+      }
+      const payload = JSON.stringify({
+        id: card.id,
+        pillar: card.pillar,
+        fromSystem: true,
+      });
+      e.dataTransfer.setData(CARD_DRAG_MIME, payload);
+      e.dataTransfer.setData("text/plain", card.id);
+      e.dataTransfer.effectAllowed = "move";
+      dragPillarRef.current = card.pillar;
+      setDragSource("system");
+      setDragging(card.pillar);
+    };
+  }
+
+  function handleSystemMiniDragEnd() {
+    clearDragState();
   }
 
   function handleSystemZoneDragOver(e: React.DragEvent) {
     if (gameOver || deploySuccess) return;
+    if (dragSource === "system") return;
     const p = dragPillarRef.current;
     if (!p || !pillarAllowedInSystem(p)) return;
     e.preventDefault();
@@ -575,8 +726,7 @@ export default function App() {
     setSelected_controls(nextSel.selected_controls);
     setDeploySuccess(false);
     setMoves((m) => m + 1);
-    dragPillarRef.current = null;
-    setDragging(null);
+    clearDragState();
   }
 
   function applyModelToSystem(payload: { id: string; pillar: Pillar }) {
@@ -593,16 +743,14 @@ export default function App() {
     setSelected_models([payload.id]);
     setDeploySuccess(false);
     setMoves((m) => m + 1);
-    dragPillarRef.current = null;
-    setDragging(null);
+    clearDragState();
   }
 
   function applyControlToSystem(payload: { id: string; pillar: Pillar }) {
     if (payload.pillar !== "CONTROL" || buildStep !== 2) return;
     const prevSel: GameSelection = { ...selectionRef.current };
     if (prevSel.selected_controls.includes(payload.id)) {
-      dragPillarRef.current = null;
-      setDragging(null);
+      clearDragState();
       return;
     }
     const def = CARD_BY_ID[payload.id];
@@ -615,15 +763,15 @@ export default function App() {
     setSelected_controls(nextSel.selected_controls);
     setDeploySuccess(false);
     setMoves((m) => m + 1);
-    dragPillarRef.current = null;
-    setDragging(null);
+    clearDragState();
   }
 
   function handleSystemZoneDrop(e: React.DragEvent) {
     e.preventDefault();
     if (gameOver || deploySuccess) return;
     const payload = parseCardDragPayload(e);
-    if (!payload || !pillarAllowedInSystem(payload.pillar)) return;
+    if (!payload || payload.fromSystem) return;
+    if (!pillarAllowedInSystem(payload.pillar)) return;
     if (payload.pillar === "DATA") {
       applyDataToSystem(payload);
       return;
@@ -641,7 +789,116 @@ export default function App() {
     Boolean(placedData && placedModel && selected_controls.length === 0);
 
   const draggingAllowed =
-    dragging != null && pillarAllowedInSystem(dragging);
+    dragging != null &&
+    dragSource === "lane" &&
+    pillarAllowedInSystem(dragging);
+
+  const systemMiniDraggable = !gameOver && !deploySuccess;
+
+  function removePlacedFromSystem(
+    prevSel: GameSelection,
+    nextSel: GameSelection,
+  ) {
+    saveSnapshotBeforeMove();
+    const triggeredGameOver = applyRiskTransition(prevSel, nextSel);
+    if (!triggeredGameOver) {
+      const nextResult = computeGameState(nextSel);
+      const stillViolated = hasDeployViolations(
+        nextResult.risks,
+        nextSel,
+        nextResult.unsafeNoHumanOversight,
+      );
+      if (stillViolated) {
+        setRecoveryGraceRemaining((g) => {
+          if (g === null) return null;
+          return Math.min(RECOVERY_GRACE_MOVES, g + 1);
+        });
+      }
+    }
+    setBlueMessage("");
+    setDeploySuccess(false);
+    setMoves((m) => m + 1);
+    clearDragState();
+  }
+
+  function removeDataFromSystem(payload: { id: string; pillar: Pillar }) {
+    if (payload.pillar !== "DATA" || payload.id !== systemDataId) return;
+    const prevSel: GameSelection = { ...selectionRef.current };
+    const nextSel: GameSelection = {
+      selected_data: [],
+      selected_models: [],
+      selected_controls: [],
+    };
+    removePlacedFromSystem(prevSel, nextSel);
+    setSelected_data(nextSel.selected_data);
+    setSelected_models(nextSel.selected_models);
+    setSelected_controls(nextSel.selected_controls);
+  }
+
+  function removeModelFromSystem(payload: { id: string; pillar: Pillar }) {
+    if (payload.pillar !== "MODEL" || payload.id !== systemModelId) return;
+    const prevSel: GameSelection = { ...selectionRef.current };
+    const nextSel: GameSelection = {
+      selected_data: [...prevSel.selected_data],
+      selected_models: [],
+      selected_controls: [],
+    };
+    removePlacedFromSystem(prevSel, nextSel);
+    setSelected_models(nextSel.selected_models);
+    setSelected_controls(nextSel.selected_controls);
+  }
+
+  function removeControlFromSystem(payload: { id: string; pillar: Pillar }) {
+    if (payload.pillar !== "CONTROL") return;
+    const prevSel: GameSelection = { ...selectionRef.current };
+    if (!prevSel.selected_controls.includes(payload.id)) return;
+    const nextSel: GameSelection = {
+      ...prevSel,
+      selected_controls: prevSel.selected_controls.filter(
+        (id) => id !== payload.id,
+      ),
+    };
+    removePlacedFromSystem(prevSel, nextSel);
+    setSelected_controls(nextSel.selected_controls);
+  }
+
+  function handleColumnDragOver(pillar: Pillar) {
+    return (e: React.DragEvent) => {
+      if (gameOver || deploySuccess) return;
+      if (dragSource !== "system" || dragging !== pillar) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+    };
+  }
+
+  function handleColumnDrop(pillar: Pillar) {
+    return (e: React.DragEvent) => {
+      e.preventDefault();
+      if (gameOver || deploySuccess) return;
+      const payload = parseCardDragPayload(e);
+      if (!payload || !payload.fromSystem || payload.pillar !== pillar) return;
+      if (pillar === "DATA") {
+        removeDataFromSystem(payload);
+        return;
+      }
+      if (pillar === "MODEL") {
+        removeModelFromSystem(payload);
+        return;
+      }
+      removeControlFromSystem(payload);
+    };
+  }
+
+  const systemChainClass =
+    "system-chain" +
+    (placedData && placedModel ? " system-chain--connected" : "") +
+    (placedData && !placedModel ? " system-chain--foundation-only" : "") +
+    (gameOver ? " system-chain--collapsed" : "") +
+    (deploySuccess ? " system-chain--settled" : "") +
+    (selected_controls.length > 0 ? " system-chain--has-stabilisers" : "") +
+    ` system-chain--stability-${structureVisualTier}` +
+    ` system-chain--foundation-${foundationVisual}` +
+    ` system-chain--model-${modelWeightVisual}`;
 
   const systemZoneClass =
     "system-zone" +
@@ -653,6 +910,13 @@ export default function App() {
     !deploySuccess
       ? " system-zone--unstable"
       : "") +
+    (structureVisualTier === "at_risk" &&
+    towerBuilt &&
+    !gameOver &&
+    !deploySuccess
+      ? " system-zone--structure-at-risk"
+      : "") +
+    (structureImpactFlash ? " system-zone--structure-impact" : "") +
     (connectedNoControls && !deploySuccess ? " system-zone--unshielded" : "");
 
   const systemZoneAria =
@@ -670,9 +934,15 @@ export default function App() {
   }, [buildStep, deploySuccess, gameOver]);
 
   function columnClass(pillar: Pillar) {
+    const returnDrop =
+      dragSource === "system" &&
+      dragging === pillar &&
+      !gameOver &&
+      !deploySuccess;
     return (
       "column" +
-      (activeLaneSet.has(pillar) ? " column--needs-action" : "")
+      (activeLaneSet.has(pillar) ? " column--needs-action" : "") +
+      (returnDrop ? " column--accept-return" : "")
     );
   }
 
@@ -764,49 +1034,60 @@ export default function App() {
               )}
               {hasSystemContent && (
                 <div
-                  className={
-                    "system-chain" +
-                    (placedData && placedModel
-                      ? " system-chain--connected"
-                      : "")
-                  }
+                  className={systemChainClass}
+                  data-structure-stability={structureVisualTier}
                 >
-                  <div className="system-chain__row">
-                    {placedData && (
-                      <div
-                        className="system-anchor system-anchor--data"
-                        role="group"
-                        aria-label="Data in system"
-                      >
-                        <SystemMiniCard card={placedData} />
-                      </div>
-                    )}
+                  <div
+                    className="system-chain__tower"
+                    style={towerSwingVars}
+                  >
+                    <div className="system-chain__row">
+                      {placedData && (
+                        <div
+                          className="system-anchor system-anchor--data"
+                          role="group"
+                          aria-label="Data in system"
+                        >
+                          <SystemMiniCard
+                            card={placedData}
+                            draggable={systemMiniDraggable}
+                            onDragStart={handleSystemMiniDragStart(placedData)}
+                            onDragEnd={handleSystemMiniDragEnd}
+                          />
+                        </div>
+                      )}
+                      {placedData && placedModel && (
+                        <div className="system-chain__bridge" aria-hidden="true">
+                          <span className="system-chain__line" />
+                          <Link2
+                            className="system-chain__icon"
+                            strokeWidth={2}
+                            size={18}
+                          />
+                          <span className="system-chain__line" />
+                        </div>
+                      )}
+                      {placedModel && (
+                        <div
+                          className="system-chain__model-wrap"
+                          aria-label="Model in system"
+                        >
+                          <SystemMiniCard
+                            card={placedModel}
+                            draggable={systemMiniDraggable}
+                            onDragStart={handleSystemMiniDragStart(placedModel)}
+                            onDragEnd={handleSystemMiniDragEnd}
+                          />
+                        </div>
+                      )}
+                    </div>
                     {placedData && placedModel && (
-                      <div className="system-chain__bridge" aria-hidden="true">
-                        <span className="system-chain__line" />
-                        <Link2
-                          className="system-chain__icon"
-                          strokeWidth={2}
-                          size={18}
-                        />
-                        <span className="system-chain__line" />
-                      </div>
-                    )}
-                    {placedModel && (
-                      <div
-                        className="system-chain__model-wrap"
-                        aria-label="Model in system"
-                      >
-                        <SystemMiniCard card={placedModel} />
-                      </div>
+                      <p className="system-chain__status">
+                        <span className="system-chain__status-dot" />
+                        Connected
+                      </p>
                     )}
                   </div>
-                  {placedData && placedModel && (
-                    <p className="system-chain__status">
-                      <span className="system-chain__status-dot" />
-                      Connected
-                    </p>
-                  )}
                   {selected_controls.length > 0 && (
                     <div
                       className="system-chain__row system-chain__row--controls"
@@ -814,7 +1095,15 @@ export default function App() {
                     >
                       {selected_controls.map((cid) => {
                         const c = findViewCard(cid);
-                        return c ? <SystemMiniCard key={cid} card={c} /> : null;
+                        return c ? (
+                          <SystemMiniCard
+                            key={cid}
+                            card={c}
+                            draggable={systemMiniDraggable}
+                            onDragStart={handleSystemMiniDragStart(c)}
+                            onDragEnd={handleSystemMiniDragEnd}
+                          />
+                        ) : null;
                       })}
                     </div>
                   )}
@@ -865,6 +1154,8 @@ export default function App() {
             <div
               className={columnClass("DATA")}
               data-active-lane={activeLaneSet.has("DATA") ? "true" : undefined}
+              onDragOver={handleColumnDragOver("DATA")}
+              onDrop={handleColumnDrop("DATA")}
             >
               <h2 className="column-title">Data</h2>
               {DATA_CARDS.filter((c) => !selected_data.includes(c.id)).map(
@@ -884,6 +1175,8 @@ export default function App() {
             <div
               className={columnClass("MODEL")}
               data-active-lane={activeLaneSet.has("MODEL") ? "true" : undefined}
+              onDragOver={handleColumnDragOver("MODEL")}
+              onDrop={handleColumnDrop("MODEL")}
             >
               <h2 className="column-title">Model</h2>
               {MODEL_CARDS.filter((c) => !selected_models.includes(c.id)).map(
@@ -903,6 +1196,8 @@ export default function App() {
             <div
               className={columnClass("CONTROL")}
               data-active-lane={activeLaneSet.has("CONTROL") ? "true" : undefined}
+              onDragOver={handleColumnDragOver("CONTROL")}
+              onDrop={handleColumnDrop("CONTROL")}
             >
               <h2 className="column-title">Controls</h2>
               {CONTROL_CARDS.filter((c) => !selected_controls.includes(c.id)).map(

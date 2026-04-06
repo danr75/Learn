@@ -878,6 +878,36 @@
   box-shadow: inset 0 0 0 1px rgba(252, 211, 77, 0.12);
 }
 
+/* Amber cue when structure is tight but not breached */
+.system-zone--structure-at-risk {
+  border-color: rgba(251, 191, 36, 0.38);
+  box-shadow:
+    inset 0 0 24px rgba(251, 191, 36, 0.07),
+    0 0 0 1px rgba(251, 191, 36, 0.1);
+}
+
+.system-zone--structure-impact {
+  animation: zone-structure-impact 0.38s ease-out;
+}
+
+@keyframes zone-structure-impact {
+  0% {
+    box-shadow: inset 0 0 0 transparent;
+  }
+  40% {
+    box-shadow: inset 0 0 32px rgba(94, 234, 212, 0.2);
+  }
+  100% {
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .system-zone--structure-impact {
+    animation: none;
+  }
+}
+
 .system-chain {
   display: flex;
   flex-direction: column;
@@ -886,6 +916,189 @@
   width: 100%;
   max-width: 36rem;
   margin: 0 auto;
+}
+
+/* Foundation + model stack (sways); controls stay outside as braces */
+.system-chain__tower {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  transform-origin: 50% 100%;
+  will-change: transform;
+  transition:
+    transform 0.32s ease-out,
+    filter 0.32s ease-out;
+}
+
+.system-chain--connected.system-chain--stability-stable:not(
+    .system-chain--collapsed
+  ):not(.system-chain--settled)
+  .system-chain__tower {
+  transform: none;
+  animation: none;
+}
+
+.system-chain--connected.system-chain--stability-at_risk:not(
+    .system-chain--collapsed
+  ):not(.system-chain--settled)
+  .system-chain__tower {
+  animation: tower-sway-risk 2.75s ease-in-out infinite;
+}
+
+.system-chain--connected.system-chain--stability-unstable:not(
+    .system-chain--collapsed
+  ):not(.system-chain--settled)
+  .system-chain__tower {
+  animation: tower-sway-unstable 1.05s ease-in-out infinite;
+}
+
+@keyframes tower-sway-risk {
+  0%,
+  100% {
+    transform: rotate(calc(-1 * var(--tower-tilt, 2deg)))
+      translateX(calc(-0.45 * var(--tower-nudge, 5px)));
+  }
+  50% {
+    transform: rotate(var(--tower-tilt, 2deg))
+      translateX(calc(0.45 * var(--tower-nudge, 5px)));
+  }
+}
+
+@keyframes tower-sway-unstable {
+  0%,
+  100% {
+    transform: rotate(calc(-1 * var(--tower-tilt, 4deg)))
+      translateX(calc(-0.85 * var(--tower-nudge, 8px)));
+  }
+  33% {
+    transform: rotate(calc(0.65 * var(--tower-tilt, 4deg)))
+      translateY(-3px);
+  }
+  66% {
+    transform: rotate(var(--tower-tilt, 4deg))
+      translateX(calc(0.85 * var(--tower-nudge, 8px)));
+  }
+}
+
+/* Data-only: subtle base pulse (stronger when synthetic “weaker” foundation) */
+.system-chain--foundation-only.system-chain--foundation-weak
+  .system-anchor--data {
+  animation: foundation-settle-weak 2.9s ease-in-out infinite;
+}
+
+.system-chain--foundation-only.system-chain--foundation-medium
+  .system-anchor--data,
+.system-chain--foundation-only.system-chain--foundation-strong
+  .system-anchor--data {
+  animation: foundation-settle 3.4s ease-in-out infinite;
+}
+
+@keyframes foundation-settle {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes foundation-settle-weak {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+/* Stabilisers: brace the stack */
+.system-chain--has-stabilisers .system-chain__row--controls {
+  border-left: 2px solid rgba(94, 234, 212, 0.32);
+  border-right: 2px solid rgba(94, 234, 212, 0.32);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  background: rgba(94, 234, 212, 0.06);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2);
+}
+
+.system-chain--has-stabilisers .system-chain__row--controls .system-mini-card {
+  box-shadow:
+    0 0 0 1px rgba(94, 234, 212, 0.22),
+    var(--shadow-card);
+}
+
+/* Recovery window expired: structure breaks apart */
+.system-chain--collapsed .system-chain__tower {
+  animation: tower-collapse 0.55s ease forwards !important;
+}
+
+.system-chain--collapsed .system-chain__bridge {
+  opacity: 0.25;
+  transition: opacity 0.45s ease, transform 0.45s ease;
+  transform: scale(0.75) rotate(14deg);
+}
+
+.system-chain--collapsed .system-anchor--data {
+  transition: transform 0.5s ease, opacity 0.5s ease;
+  transform: translate(-10px, 8px) rotate(-8deg);
+  opacity: 0.82;
+}
+
+.system-chain--collapsed .system-chain__model-wrap {
+  transition: transform 0.5s ease, opacity 0.5s ease;
+  transform: translate(12px, -6px) rotate(10deg);
+  opacity: 0.78;
+}
+
+.system-chain--collapsed .system-chain__status {
+  opacity: 0.35;
+}
+
+@keyframes tower-collapse {
+  0% {
+    transform: rotate(0deg) translateY(0);
+    filter: none;
+  }
+  100% {
+    transform: rotate(4deg) translateY(10px);
+    filter: brightness(0.92);
+  }
+}
+
+/* Successful deploy: stack reads locked and calm */
+.system-chain--settled .system-chain__tower {
+  animation: none !important;
+  transform: none;
+  filter: drop-shadow(0 0 14px rgba(94, 234, 212, 0.22));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .system-chain__tower {
+    animation: none !important;
+  }
+
+  .system-chain--connected.system-chain--stability-at_risk .system-chain__tower,
+  .system-chain--connected.system-chain--stability-unstable .system-chain__tower {
+    transform: rotate(-1.5deg);
+  }
+
+  .system-chain--foundation-only .system-anchor--data {
+    animation: none;
+  }
+
+  .system-chain--collapsed .system-chain__tower {
+    animation: none !important;
+    transform: translateY(6px);
+    opacity: 0.85;
+  }
+
+  .system-chain--collapsed .system-chain__bridge {
+    opacity: 0.3;
+  }
 }
 
 .system-chain__row {
@@ -939,6 +1152,14 @@
   background: var(--model-card-bg);
   border: 1px solid var(--model-card-border);
   box-shadow: var(--shadow-card);
+}
+
+.system-mini-card--draggable {
+  cursor: grab;
+}
+
+.system-mini-card--draggable:active {
+  cursor: grabbing;
 }
 
 .system-mini-card .game-card__icon {
@@ -1137,6 +1358,19 @@
   .column--needs-action {
     animation: none;
   }
+}
+
+/* Drop zone when dragging a component out of System back to its lane */
+.column--accept-return {
+  box-shadow: inset 0 0 0 2px rgba(94, 234, 212, 0.38);
+  border-radius: var(--radius-md);
+}
+
+.column--needs-action.column--accept-return {
+  box-shadow:
+    inset 0 0 0 1px rgba(94, 234, 212, 0.12),
+    0 0 24px rgba(94, 234, 212, 0.1),
+    inset 0 0 0 2px rgba(94, 234, 212, 0.45);
 }
 
 @keyframes column-needs-action-pulse {
